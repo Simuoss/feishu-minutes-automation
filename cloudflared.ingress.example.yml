@@ -1,0 +1,19 @@
+# Cloudflare Named Tunnel：单域名路径分流示例
+# 在 Zero Trust → Tunnels → Public Hostname 按同样顺序配置亦可：
+#   1) hostname=larkmeeting.example.com  path=/api*  → http://127.0.0.1:7354
+#   2) hostname=larkmeeting.example.com  path=（空） → http://127.0.0.1:7355
+#
+# 也可把本文件内容合并进本机 cloudflared config 的 ingress 段。
+
+tunnel: <TUNNEL_UUID>
+credentials-file: C:\Windows\System32\config\systemprofile\.cloudflared\<TUNNEL_UUID>.json
+
+ingress:
+  # 必须更靠前：API
+  - hostname: larkmeeting.example.com
+    path: /api*
+    service: http://127.0.0.1:7354
+  # 前端静态页
+  - hostname: larkmeeting.example.com
+    service: http://127.0.0.1:7355
+  - service: http_status:404

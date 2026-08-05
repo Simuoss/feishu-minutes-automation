@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>管理员登录 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-thinking" />
+</head>
+<body>
+  <div id="app" class="login-page">
+    <main class="login-card">
+      <h1>飞书妙记</h1>
+      <p class="subtitle">请输入管理员口令以继续</p>
+      <label class="field field-wide">
+        <span>管理员 Token</span>
+        <input id="admin-token-input" type="password" autocomplete="current-password" placeholder="ADMIN_TOKEN" />
+      </label>
+      <p id="login-error" class="login-error hidden"></p>
+      <button id="login-btn" class="btn btn-primary" type="button"><i class="ri ri-login-box-line" aria-hidden="true"></i><span class="btn-label">登录</span></button>
+    </main>
+  </div>
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/login.js?v=20260805-sameorigin"></script>
+</body>
+</html>

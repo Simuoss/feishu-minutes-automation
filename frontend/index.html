@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-sidebar" />
+</head>
+<body class="admin-body" data-admin-page="meetings">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+    <header class="header admin-header">
+      <div class="header-main">
+        <div>
+          <h1>会议列表</h1>
+          <p class="subtitle">云端会议 · 本地持久化</p>
+        </div>
+      </div>
+    </header>
+
+    <main id="list-view" class="view">
+      <div id="auth-banner" class="auth-banner hidden">
+        <span>搜索云端妙记需先登录飞书账号</span>
+        <a id="login-link" class="btn btn-primary btn-sm" href="#"><i class="ri ri-login-box-line" aria-hidden="true"></i><span class="btn-label">登录飞书</span></a>
+      </div>
+
+      <div id="scope-banner" class="scope-banner hidden">
+        <div class="scope-banner-text">
+          <strong id="scope-banner-title">下载失败：权限不足</strong>
+          <p id="scope-banner-msg"></p>
+        </div>
+        <a id="scope-auth-link" class="btn btn-primary btn-sm" href="#" target="_blank" rel="noopener"><i class="ri ri-shield-keyhole-line" aria-hidden="true"></i><span class="btn-label">重新授权</span></a>
+      </div>
+
+      <section class="panel">
+        <h2 class="panel-title">筛选条件</h2>
+        <div class="filter-grid">
+          <label class="field field-wide">
+            <span>关键词</span>
+            <input id="search-input" type="search" placeholder="标题 / 关键词 / 所有者 / token" />
+          </label>
+          <label class="field">
+            <span>开始时间</span>
+            <input id="start-time" type="datetime-local" />
+          </label>
+          <label class="field">
+            <span>结束时间</span>
+            <input id="end-time" type="datetime-local" />
+          </label>
+          <label class="field">
+            <span>最短时长（分）</span>
+            <input id="min-duration" type="number" min="0" step="1" placeholder="不限" />
+          </label>
+          <label class="field">
+            <span>最长时长（分）</span>
+            <input id="max-duration" type="number" min="0" step="1" placeholder="不限" />
+          </label>
+        </div>
+      </section>
+
+      <section class="panel panel-actions">
+        <div class="actions-left">
+          <button id="search-btn" class="btn btn-primary" type="button"><i class="ri ri-search-line" aria-hidden="true"></i><span class="btn-label">搜索</span></button>
+          <button id="refresh-btn" class="btn" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span></button>
+          <button id="select-all-btn" class="btn" type="button"><i class="ri ri-checkbox-multiple-line" aria-hidden="true"></i><span class="btn-label">全选本页</span></button>
+          <button id="download-btn" class="btn" type="button" disabled><i class="ri ri-download-2-line" aria-hidden="true"></i><span class="btn-label">下载选中</span></button>
+          <button id="batch-summary-btn" class="btn" type="button" disabled><i class="ri ri-article-line" aria-hidden="true"></i><span class="btn-label">生成纪要</span></button>
+          <button id="share-selected-btn" class="btn" type="button" disabled><i class="ri ri-share-forward-line" aria-hidden="true"></i><span class="btn-label">分享选中</span></button>
+        </div>
+        <div class="actions-right">
+          <label class="field field-inline">
+            <span>每页</span>
+            <select id="page-size">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <label class="field field-inline">
+            <span>时间排序</span>
+            <select id="sort-order">
+              <option value="desc" selected>倒序（新→旧）</option>
+              <option value="asc">正序（旧→新）</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <div id="list-status" class="status"></div>
+      <ul id="meeting-list" class="meeting-list"></ul>
+      <div class="pager">
+        <button id="prev-page" class="btn" type="button" disabled><i class="ri ri-arrow-left-s-line" aria-hidden="true"></i><span class="btn-label">上一页</span></button>
+        <span id="page-indicator" class="page-indicator"></span>
+        <button id="next-page" class="btn" type="button" disabled><span class="btn-label">下一页</span><i class="ri ri-arrow-right-s-line" aria-hidden="true"></i></button>
+      </div>
+    </main>
+    </div>
+  </div>
+
+  <div id="download-batch-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="download-batch-title">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="download-batch-title" class="modal-title">已同步会议如何处理？</h3>
+      <p id="download-batch-msg" class="modal-msg"></p>
+      <div class="modal-checks">
+        <label class="modal-check">
+          <input id="download-redownload-media" type="checkbox" />
+          <span>重新下载已同步会议的音视频</span>
+        </label>
+        <label class="modal-check">
+          <input id="download-redownload-transcript" type="checkbox" />
+          <span>重新下载已同步会议的转写文本</span>
+        </label>
+      </div>
+      <p class="modal-hint">未勾选时将保留本地已有文件，只下载尚未同步的会议。</p>
+      <div class="modal-actions">
+        <button id="download-batch-confirm" class="btn btn-primary" type="button"><i class="ri ri-download-2-line" aria-hidden="true"></i><span class="btn-label">开始下载</span></button>
+        <button id="download-batch-cancel" class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="summary-batch-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="summary-batch-title">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="summary-batch-title" class="modal-title">已有纪要如何处理？</h3>
+      <p id="summary-batch-msg" class="modal-msg"></p>
+      <div class="modal-actions">
+        <button id="summary-batch-keep" class="btn btn-primary" type="button"><i class="ri ri-checkbox-circle-line" aria-hidden="true"></i><span class="btn-label">保留已有，只生成缺失的</span></button>
+        <button id="summary-batch-force" class="btn" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">全部重新生成</span></button>
+        <button id="summary-batch-cancel" class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="share-batch-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="share-batch-title">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="share-batch-title" class="modal-title">分享选中会议</h3>
+      <p id="share-batch-msg" class="modal-msg"></p>
+      <div class="filter-grid">
+        <label class="field">
+          <span>访问方式</span>
+          <select id="share-batch-access-mode">
+            <option value="PUBLIC">公开访问</option>
+            <option value="KEY_REQUIRED">需要密钥</option>
+          </select>
+        </label>
+        <label class="field hidden" id="share-batch-key-field">
+          <span>选择密钥</span>
+          <select id="share-batch-key-select"></select>
+        </label>
+        <label class="field field-wide modal-check">
+          <input id="share-batch-allow-export" type="checkbox" />
+          <span>允许访客导出纪要 / 转写</span>
+        </label>
+      </div>
+      <p class="modal-hint">若会议已有相同权限的有效分享，将复用现有链接；否则新建。</p>
+      <div class="modal-actions">
+        <button id="share-batch-confirm" class="btn btn-primary" type="button"><i class="ri ri-file-copy-line" aria-hidden="true"></i><span class="btn-label">生成并复制链接</span></button>
+        <button id="share-batch-cancel" class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/admin-shell.js?v=20260805-sidebar"></script>
+  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/list.js?v=20260805-thinking"></script>
+</body>
+</html>

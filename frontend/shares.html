@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>分享管理 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-sidebar" />
+</head>
+<body class="admin-body" data-admin-page="shares">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+    <header class="header admin-header">
+      <div class="header-main">
+        <div>
+          <h1>分享管理</h1>
+          <p class="subtitle">查看与调整已发出的分享链接</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="view">
+      <section class="panel">
+        <h2 class="panel-title">综合筛选</h2>
+        <div class="filter-grid">
+          <label class="field field-wide">
+            <span>名称 / Token</span>
+            <input id="filter-q" type="search" placeholder="会议名、minute_token、share_token" />
+          </label>
+          <label class="field">
+            <span>创建时间起</span>
+            <input id="filter-created-from" type="datetime-local" />
+          </label>
+          <label class="field">
+            <span>创建时间止</span>
+            <input id="filter-created-to" type="datetime-local" />
+          </label>
+          <label class="field">
+            <span>密钥</span>
+            <select id="filter-key">
+              <option value="">全部</option>
+              <option value="none">无密钥（公开）</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>是否可导出</span>
+            <select id="filter-allow-export">
+              <option value="">全部</option>
+              <option value="true">可导出</option>
+              <option value="false">不可导出</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>访问方式</span>
+            <select id="filter-access-mode">
+              <option value="">全部</option>
+              <option value="PUBLIC">公开访问</option>
+              <option value="KEY_REQUIRED">需要密钥</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>状态</span>
+            <select id="filter-status">
+              <option value="ACTIVE" selected>有效</option>
+              <option value="REVOKED">已吊销</option>
+              <option value="ALL">全部</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>排序字段</span>
+            <select id="filter-sort-by">
+              <option value="CREATED_AT" selected>创建时间</option>
+              <option value="TITLE">名称</option>
+              <option value="ACCESS_KEY_ID">密钥</option>
+              <option value="ALLOW_EXPORT">是否可导出</option>
+              <option value="ACCESS_MODE">访问方式</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>排序方向</span>
+            <select id="filter-sort-order">
+              <option value="DESC" selected>倒序</option>
+              <option value="ASC">正序</option>
+            </select>
+          </label>
+        </div>
+        <div class="actions-left" style="margin-top: 0.75rem;">
+          <button id="apply-filter-btn" class="btn btn-primary btn-sm" type="button"><i class="ri ri-filter-3-line" aria-hidden="true"></i><span class="btn-label">应用筛选</span></button>
+          <button id="reset-filter-btn" class="btn btn-sm" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">重置</span></button>
+          <button id="refresh-shares-btn" class="btn btn-sm" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span></button>
+        </div>
+      </section>
+
+      <section class="panel panel-actions">
+        <div class="actions-left">
+          <button id="select-all-shares-btn" class="btn btn-sm" type="button"><i class="ri ri-checkbox-multiple-line" aria-hidden="true"></i><span class="btn-label">全选本页</span></button>
+          <button id="batch-copy-btn" class="btn btn-sm" type="button" disabled><i class="ri ri-file-copy-line" aria-hidden="true"></i><span class="btn-label">批量复制</span></button>
+          <button id="batch-edit-btn" class="btn btn-sm" type="button" disabled><i class="ri ri-edit-line" aria-hidden="true"></i><span class="btn-label">批量改权限</span></button>
+          <button id="batch-revoke-btn" class="btn btn-sm" type="button" disabled><i class="ri ri-link-unlink" aria-hidden="true"></i><span class="btn-label">批量取消</span></button>
+        </div>
+        <div class="actions-right">
+          <span id="selection-status" class="status" style="margin: 0;">未选中</span>
+        </div>
+      </section>
+
+      <div id="shares-status" class="status"></div>
+      <ul id="shares-list" class="meeting-list"></ul>
+    </main>
+    </div>
+  </div>
+
+  <div id="share-edit-dialog" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="share-edit-heading" class="modal-title">编辑分享</h3>
+      <p id="share-edit-title" class="modal-msg"></p>
+      <div class="filter-grid">
+        <label class="field">
+          <span>访问方式</span>
+          <select id="edit-access-mode">
+            <option value="PUBLIC">公开访问</option>
+            <option value="KEY_REQUIRED">需要密钥</option>
+          </select>
+        </label>
+        <label class="field" id="edit-key-field">
+          <span>选择密钥</span>
+          <select id="edit-key-select"></select>
+        </label>
+        <label class="field field-wide modal-check">
+          <input id="edit-allow-export" type="checkbox" />
+          <span>允许访客导出纪要 / 转写</span>
+        </label>
+      </div>
+      <p class="modal-hint">修改访问方式或密钥后，已解锁的访客需重新输入密钥。</p>
+      <div class="modal-actions">
+        <button id="share-edit-save" class="btn btn-primary" type="button"><i class="ri ri-save-line" aria-hidden="true"></i><span class="btn-label">保存</span></button>
+        <button class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/admin-shell.js?v=20260805-sidebar"></script>
+  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/shares.js?v=20260805-thinking"></script>
+</body>
+</html>

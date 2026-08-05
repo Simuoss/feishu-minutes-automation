@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/app.db
+data/meetings/
+data/feishu_user_token.json
+data/_probe_frames/
+*.log
+.tmp/

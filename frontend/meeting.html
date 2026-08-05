@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>会议详情 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-sidebar" />
+</head>
+<body class="admin-body" data-admin-page="meeting">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+    <header class="header admin-header">
+      <div class="header-main">
+        <div>
+          <h1>会议详情</h1>
+          <p class="subtitle">纪要 · 转写 · 本地媒体</p>
+        </div>
+      </div>
+    </header>
+
+    <main id="detail-view" class="view">
+      <div class="detail-header">
+        <div class="detail-header-actions">
+          <a id="back-btn" class="btn" href="/"><i class="ri ri-arrow-left-line" aria-hidden="true"></i><span class="btn-label">返回列表</span></a>
+          <button id="share-btn" class="btn btn-sm" type="button"><i class="ri ri-share-forward-line" aria-hidden="true"></i><span class="btn-label">分享</span></button>
+        </div>
+        <h2 id="detail-title"></h2>
+        <p id="detail-meta" class="detail-meta"></p>
+      </div>
+      <section id="media-section" class="media-section hidden">
+        <h3>本地音视频</h3>
+        <div id="media-players" class="media-players"></div>
+      </section>
+      <div id="detail-tabs" class="detail-tabs hidden">
+        <button class="tab-btn is-active" data-tab="summary" type="button"><i class="ri ri-article-line" aria-hidden="true"></i><span>课程纪要</span></button>
+        <button class="tab-btn" data-tab="transcript" type="button"><i class="ri ri-chat-quote-line" aria-hidden="true"></i><span>转写全文</span></button>
+      </div>
+
+      <section id="summary-pane" class="tab-pane hidden">
+        <div class="summary-toolbar">
+          <button id="generate-summary-btn" class="btn btn-primary btn-sm" type="button"><i class="ri ri-magic-line" aria-hidden="true"></i><span class="btn-label">生成纪要</span></button>
+          <label class="summary-mode-label" for="summary-run-mode">模式
+            <select id="summary-run-mode" class="summary-mode-select" title="分阶段重跑">
+              <option value="FULL">完整生成</option>
+              <option value="REDACT">仅重新脱敏</option>
+              <option value="WRITE">仅重新成文</option>
+              <option value="R2_SYNC">仅同步 R2</option>
+            </select>
+          </label>
+          <button id="copy-summary-btn" class="btn btn-sm hidden" type="button"><i class="ri ri-file-copy-line" aria-hidden="true"></i><span class="btn-label">复制 Markdown</span></button>
+          <div id="summary-export" class="export-group">
+            <button class="btn btn-sm" type="button" data-export-summary="pdf"><i class="ri ri-file-pdf-2-line" aria-hidden="true"></i><span class="btn-label">PDF</span></button>
+            <button class="btn btn-sm" type="button" data-export-summary="docx"><i class="ri ri-file-word-2-line" aria-hidden="true"></i><span class="btn-label">DOCX</span></button>
+            <button class="btn btn-sm" type="button" data-export-summary="md"><i class="ri ri-markdown-line" aria-hidden="true"></i><span class="btn-label">MD</span></button>
+          </div>
+          <span id="summary-meta" class="summary-meta"></span>
+        </div>
+        <div id="summary-progress" class="summary-progress hidden">
+          <ol id="summary-stage-steps" class="summary-stage-steps" aria-label="生成阶段"></ol>
+          <p id="summary-progress-label" class="summary-progress-label"></p>
+          <ol id="summary-plan" class="summary-plan hidden"></ol>
+        </div>
+        <p id="summary-empty" class="summary-empty">
+          还没有纪要。点击「生成纪要」，把这节课整理成按知识结构组织、可点击时间跳转的复习笔记。
+        </p>
+        <article id="summary-content" class="summary-content"></article>
+      </section>
+
+      <section id="transcript-pane" class="tab-pane hidden">
+        <div id="sync-toolbar" class="sync-toolbar hidden">
+          <button id="scroll-mode-btn" class="btn btn-sm" type="button"><i class="ri ri-focus-3-line" aria-hidden="true"></i><span class="btn-label">跟随模式</span></button>
+          <span id="sync-hint" class="sync-hint">播放或拖动进度条时，转写自动滚动到对应位置</span>
+        </div>
+        <div id="transcript-section" class="transcript-section hidden">
+          <div class="transcript-header">
+            <h3>转写文本</h3>
+            <button id="copy-transcript-btn" class="btn btn-sm" type="button"><i class="ri ri-file-copy-line" aria-hidden="true"></i><span class="btn-label">复制全文</span></button>
+            <div id="transcript-export" class="export-group">
+              <button class="btn btn-sm" type="button" data-export-transcript="md"><i class="ri ri-markdown-line" aria-hidden="true"></i><span class="btn-label">MD</span></button>
+              <button class="btn btn-sm" type="button" data-export-transcript="txt"><i class="ri ri-file-text-line" aria-hidden="true"></i><span class="btn-label">TXT</span></button>
+            </div>
+          </div>
+          <div id="transcript-scroll" class="transcript-scroll"></div>
+        </div>
+      </section>
+
+      <p id="detail-empty" class="empty hidden">暂无本地媒体或转写内容</p>
+    </main>
+    </div>
+  </div>
+
+  <div id="share-dialog" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card modal-card-wide">
+      <h3 class="modal-title">分享会议</h3>
+      <div class="filter-grid">
+        <label class="field">
+          <span>访问方式</span>
+          <select id="share-access-mode">
+            <option value="PUBLIC">公开访问</option>
+            <option value="KEY_REQUIRED">需要密钥</option>
+          </select>
+        </label>
+        <label class="field" id="share-key-field">
+          <span>选择密钥</span>
+          <select id="share-key-select"></select>
+        </label>
+        <label class="field field-wide modal-check">
+          <input id="share-allow-export" type="checkbox" />
+          <span>允许访客导出纪要 / 转写</span>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="share-create-btn" class="btn btn-primary" type="button"><i class="ri ri-link" aria-hidden="true"></i><span class="btn-label">创建分享链接</span></button>
+        <button class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">关闭</span></button>
+      </div>
+      <p id="share-result" class="share-result hidden"></p>
+      <h4 class="panel-title">已有分享</h4>
+      <div id="share-list"></div>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/admin-shell.js?v=20260805-sidebar"></script>
+  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/meeting.js?v=20260805-sidebar"></script>
+</body>
+</html>

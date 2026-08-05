@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>我的分享 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-thinking" />
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="header-main">
+        <div>
+          <h1>我的分享</h1>
+          <p class="subtitle">本机已保存密钥可访问的全部分享</p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-library-btn" class="btn btn-sm" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="view">
+      <section class="panel">
+        <h2 class="panel-title">本机密钥</h2>
+        <div id="library-keys" class="meeting-list"></div>
+        <p id="library-keys-empty" class="meeting-meta hidden">本机尚未保存访问密钥。打开需密钥的分享并勾选「记住密钥」后会出现在这里。</p>
+      </section>
+
+      <section class="panel">
+        <div class="actions-right" style="margin-bottom: 0.75rem;">
+          <label class="field field-inline">
+            <span>筛选</span>
+            <input id="library-filter" type="search" placeholder="按名称过滤" />
+          </label>
+        </div>
+        <div id="library-status" class="status"></div>
+        <ul id="library-list" class="meeting-list"></ul>
+      </section>
+    </main>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/share-storage.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/my-shares.js?v=20260805-thinking"></script>
+</body>
+</html>
