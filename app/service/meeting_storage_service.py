@@ -1,4 +1,3 @@
-import json
 import logging
 import mimetypes
 import re
@@ -40,24 +39,35 @@ class MeetingStorageService:
         return layout
 
     def write_meta(self, minute_token: str, meta: dict[str, Any]) -> Path:
+        """会议元数据只写 DB；仍确保目录布局以便落媒体/转写。"""
         layout = self.ensure_layout(minute_token)
-        meta_path = layout["base"] / "meta.json"
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        return meta_path
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import upsert_meeting_meta
+
+        try:
+            run_async(upsert_meeting_meta(minute_token, meta))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "写入会议元数据到 DB 失败 token=%s，后续列表/分享可能缺标题。err=%s",
+                minute_token,
+                exc,
+            )
+            raise
+        return layout["base"]
 
     def read_meta(self, minute_token: str) -> dict[str, Any] | None:
-        meta_path = self.get_meeting_dir(minute_token) / "meta.json"
-        if not meta_path.is_file():
-            return None
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import read_meeting_meta
+
         try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.warning(
-                "读取妙记 meta.json 失败 token=%s，怀疑文件损坏，将按空元数据继续",
+            return run_async(read_meeting_meta(minute_token))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "从 DB 读取会议元数据失败 token=%s，将按空元数据继续。err=%s",
                 minute_token,
+                exc,
             )
             return None
-        return data if isinstance(data, dict) else None
 
     @staticmethod
     def _guess_extension(content_type: str | None, url: str) -> str:
@@ -242,8 +252,18 @@ class MeetingStorageService:
         layout = self.ensure_layout(minute_token)
         summary_path = layout["output"] / "summary.md"
         summary_path.write_text(content, encoding="utf-8")
-        meta_path = layout["output"] / "summary.meta.json"
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import upsert_summary_meta
+
+        try:
+            run_async(upsert_summary_meta(minute_token, meta))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "纪要正文已落盘但元数据写 DB 失败 token=%s，指标接口可能缺数据。err=%s",
+                minute_token,
+                exc,
+            )
+            raise
         logger.info("会议纪要已保存 token=%s path=%s", minute_token, summary_path)
         return summary_path
 
@@ -252,16 +272,20 @@ class MeetingStorageService:
         if not summary_path.is_file():
             return None
 
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import read_summary_meta
+
         meta: dict[str, Any] = {}
-        meta_path = summary_path.with_name("summary.meta.json")
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                logger.warning(
-                    "纪要元数据解析失败 path=%s，怀疑上次写入被中断，将只返回正文",
-                    meta_path,
-                )
+        try:
+            db_meta = run_async(read_summary_meta(minute_token))
+            if db_meta:
+                meta = db_meta
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "从 DB 读取纪要元数据失败 token=%s，将只返回正文。err=%s",
+                minute_token,
+                exc,
+            )
 
         return {
             "minute_token": minute_token,
@@ -294,21 +318,14 @@ class MeetingStorageService:
                 path.unlink()
 
     def is_persisted(self, minute_token: str) -> bool:
-        base = self.get_meeting_dir(minute_token)
-        meta_path = base / "meta.json"
-        if not meta_path.is_file():
-            return False
-        return self.has_media(minute_token) or self.has_transcript(minute_token)
+        if self.has_media(minute_token) or self.has_transcript(minute_token):
+            return True
+        meta = self.read_meta(minute_token)
+        return bool(meta and meta.get("status") == "COMPLETED")
 
     def get_local_detail(self, minute_token: str) -> dict[str, Any] | None:
         base = self.get_meeting_dir(minute_token)
-        if not base.is_dir():
-            return None
-
-        meta: dict[str, Any] = {}
-        meta_path = base / "meta.json"
-        if meta_path.is_file():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta = self.read_meta(minute_token) or {}
 
         media_files: list[dict[str, str]] = []
         media_dir = base / "raw" / "media"

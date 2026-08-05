@@ -408,11 +408,22 @@ async def share_detail(
                 url=url,
             )
         )
+    has_video = bool(detail.get("has_video"))
+    if signed_video and not any(m.kind == "video" for m in media_files):
+        video_meta = r2_media_service.read_meta(share.minute_token).get("video") or {}
+        media_files.append(
+            LocalMediaFileResponse(
+                name=str(video_meta.get("source_name") or "video.mp4"),
+                kind="video",
+                url=signed_video,
+            )
+        )
+        has_video = True
     return LocalMeetingDetailResponse(
         minute_token=detail["minute_token"],
         title=detail.get("title"),
         duration_ms=detail.get("duration_ms"),
-        has_video=detail.get("has_video"),
+        has_video=has_video,
         media_files=media_files,
         transcript=detail.get("transcript"),
         downloaded_at=detail.get("downloaded_at"),

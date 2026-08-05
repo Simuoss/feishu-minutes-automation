@@ -9,6 +9,7 @@ class ShareEntity:
     access_mode: str
     allow_export: bool
     access_key_id: int | None
+    owner_user_id: int | None
     created_at: int
     revoked_at: int | None
 
@@ -21,6 +22,7 @@ class ShareCreateEntity:
     allow_export: bool
     access_key_id: int | None
     created_at: int
+    owner_user_id: int | None = None
 
 
 @dataclass

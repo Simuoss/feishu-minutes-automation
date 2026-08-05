@@ -20,9 +20,7 @@ from app.integrations.video.ffmpeg_client import (
 from app.service.figure_audit import (
     audit_items_to_payload,
     figures_to_manifest,
-    load_json,
     manifest_to_figures,
-    save_json,
 )
 from app.service.figure_redaction import FigureRedactionService, RedactionOutcome
 from app.service.meeting_storage_service import MeetingStorageService
@@ -184,9 +182,20 @@ class SummaryGenerationService:
         )
 
     def _load_prepared_figures(self, minute_token: str) -> list[PreparedFigure]:
-        """从清单 + assets 重建配图；无清单时回退扫描 assets 目录。"""
+        """从 DB 清单 + assets 重建配图；无清单时回退扫描 assets 目录。"""
         assets = self._storage.get_assets_dir(minute_token)
-        manifest = load_json(self._storage.get_figures_manifest_path(minute_token))
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import read_figures_manifest
+
+        try:
+            manifest = run_async(read_figures_manifest(minute_token))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "从 DB 读取配图清单失败 token=%s，将回退扫描 assets。err=%s",
+                minute_token,
+                exc,
+            )
+            manifest = None
         if manifest is not None:
             figures = manifest_to_figures(manifest, assets)
             if figures:
@@ -210,10 +219,11 @@ class SummaryGenerationService:
         return figures
 
     def _persist_manifest(self, minute_token: str, figures: list[PreparedFigure]) -> None:
-        save_json(
-            self._storage.get_figures_manifest_path(minute_token),
-            figures_to_manifest(figures),
-        )
+        payload = figures_to_manifest(figures)
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import replace_figures_from_manifest
+
+        run_async(replace_figures_from_manifest(minute_token, payload))
 
     def _persist_redaction_audit(
         self, minute_token: str, outcome: RedactionOutcome
@@ -225,7 +235,10 @@ class SummaryGenerationService:
             redacted=outcome.redacted,
             abandoned=outcome.abandoned,
         )
-        save_json(self._storage.get_redaction_audit_path(minute_token), payload)
+        from app.core.async_bridge import run_async
+        from app.service.metadata_db_service import replace_redaction_from_audit
+
+        run_async(replace_redaction_from_audit(minute_token, payload))
 
     async def _run_redaction(
         self, minute_token: str, figures: list[PreparedFigure]
@@ -305,7 +318,12 @@ class SummaryGenerationService:
 
         video_path = self._storage.find_video_path(minute_token)
         if video_path is None:
-            logger.info("会议 %s 只有音频或无媒体文件，按纯文字纪要生成", minute_token)
+            video_path = await r2_media_service.ensure_local_video(minute_token)
+        if video_path is None:
+            logger.info(
+                "会议 %s 无本地视频且无法从 R2 拉取，按纯文字纪要生成",
+                minute_token,
+            )
             return []
 
         summary_broker.update(minute_token, percent=6, stage="探测视频信息")
@@ -542,45 +560,132 @@ class SummaryGenerationService:
         transcript: str,
         mode: str = "FULL",
     ) -> SummaryResult:
-        summary_broker.update(minute_token, percent=5, stage="解析转写文本")
-        segments = parse_transcript_segments(transcript)
-        logger.info(
-            "开始生成纪要 token=%s mode=%s 转写 %d 字 / %d 个发言段落",
-            minute_token,
-            mode,
-            len(transcript),
-            len(segments),
+        from app.service.pipeline_job_service import start_job, update_job
+
+        job_id = await start_job(
+            minute_token, job_type="SUMMARY", mode=mode, stage="START"
         )
+        try:
+            summary_broker.update(minute_token, percent=5, stage="解析转写文本")
+            await update_job(job_id, stage="PARSE_TRANSCRIPT", percent=5.0)
+            segments = parse_transcript_segments(transcript)
+            logger.info(
+                "开始生成纪要 token=%s mode=%s 转写 %d 字 / %d 个发言段落",
+                minute_token,
+                mode,
+                len(transcript),
+                len(segments),
+            )
 
-        redaction_meta = {
-            "figure_scanned": 0,
-            "figure_sensitive": 0,
-            "figure_redacted": 0,
-            "figure_abandoned": 0,
-        }
-        figure_prepared = 0
-        figures: list[PreparedFigure] = []
+            redaction_meta = {
+                "figure_scanned": 0,
+                "figure_sensitive": 0,
+                "figure_redacted": 0,
+                "figure_abandoned": 0,
+            }
+            figure_prepared = 0
+            figures: list[PreparedFigure] = []
 
-        if mode == "FULL":
-            try:
-                figures = await self._prepare_figures(minute_token, transcript)
-            except LlmRequestError as exc:
-                logger.warning(
-                    "截图计划阶段模型不可用，本次降级为纯文字纪要 token=%s：%s",
+            if mode == "FULL":
+                try:
+                    figures = await self._prepare_figures(minute_token, transcript)
+                except LlmRequestError as exc:
+                    logger.warning(
+                        "截图计划阶段模型不可用，本次降级为纯文字纪要 token=%s：%s",
+                        minute_token,
+                        exc,
+                    )
+                    figures = []
+                except FfmpegError as exc:
+                    logger.warning(
+                        "抽帧失败，本次降级为纯文字纪要 token=%s：%s",
+                        minute_token,
+                        exc,
+                    )
+                    figures = []
+                figure_prepared = len(figures)
+                figures, redaction_meta = await self._run_redaction(minute_token, figures)
+                result = await self._write_summary(
                     minute_token,
-                    exc,
+                    transcript,
+                    figures,
+                    figure_prepared=figure_prepared,
+                    redaction_meta=redaction_meta,
+                    mode=mode,
                 )
-                figures = []
-            except FfmpegError as exc:
-                logger.warning(
-                    "抽帧失败，本次降级为纯文字纪要 token=%s：%s",
+                await update_job(
+                    job_id,
+                    status=result.status,
+                    stage="DONE",
+                    percent=100.0,
+                    error_message=result.error_message,
+                    finished=True,
+                )
+                return result
+
+            if mode == "REDACT":
+                figures = self._load_prepared_figures(minute_token)
+                if not figures:
+                    message = "没有可脱敏的配图，请先完整生成一次带图纪要"
+                    summary_broker.fail(minute_token, message)
+                    await update_job(
+                        job_id,
+                        status="FAILED",
+                        stage="FAILED",
+                        error_message=message,
+                        finished=True,
+                    )
+                    return SummaryResult(
+                        minute_token=minute_token,
+                        status=SummaryStatus.FAILED.value,
+                        error_message=message,
+                        mode=mode,
+                    )
+                figure_prepared = len(figures)
+                # 用原图目录覆盖 assets 再跑，避免对已打码图二次扫描
+                originals = self._storage.get_redaction_originals_dir(minute_token)
+                restored: list[PreparedFigure] = []
+                for fig in figures:
+                    original = originals / f"{fig.figure_id}.jpg"
+                    if original.is_file():
+                        shutil.copy2(original, fig.path)
+                    if fig.path.is_file():
+                        restored.append(fig)
+                figures, redaction_meta = await self._run_redaction(minute_token, restored)
+                self._persist_manifest(minute_token, figures)
+                # 更新 meta 中的脱敏统计，保留正文
+                existing = self._storage.read_summary(minute_token)
+                content = (existing or {}).get("content") or ""
+                meta = dict((existing or {}).get("meta") or {})
+                meta.update(redaction_meta)
+                meta["redacted_at"] = datetime.now(timezone.utc).isoformat()
+                meta["run_mode"] = mode
+                if existing is not None:
+                    self._storage.save_summary(minute_token, content, meta)
+                summary_broker.complete(minute_token, content, meta)
+                logger.info(
+                    "仅脱敏完成 token=%s 扫描 %d / 打码 %d / 放弃 %d",
                     minute_token,
-                    exc,
+                    redaction_meta["figure_scanned"],
+                    redaction_meta["figure_redacted"],
+                    redaction_meta["figure_abandoned"],
                 )
-                figures = []
+                await update_job(
+                    job_id, status="COMPLETED", stage="DONE", percent=100.0, finished=True
+                )
+                return SummaryResult(
+                    minute_token=minute_token,
+                    status=SummaryStatus.COMPLETED.value,
+                    char_count=len(content),
+                    figure_planned=figure_prepared,
+                    figure_used=len(figures),
+                    mode=mode,
+                )
+
+            # WRITE：跳过抽帧与脱敏，直接成文
+            figures = self._load_prepared_figures(minute_token)
             figure_prepared = len(figures)
-            figures, redaction_meta = await self._run_redaction(minute_token, figures)
-            return await self._write_summary(
+            result = await self._write_summary(
                 minute_token,
                 transcript,
                 figures,
@@ -588,67 +693,24 @@ class SummaryGenerationService:
                 redaction_meta=redaction_meta,
                 mode=mode,
             )
-
-        if mode == "REDACT":
-            figures = self._load_prepared_figures(minute_token)
-            if not figures:
-                message = "没有可脱敏的配图，请先完整生成一次带图纪要"
-                summary_broker.fail(minute_token, message)
-                return SummaryResult(
-                    minute_token=minute_token,
-                    status=SummaryStatus.FAILED.value,
-                    error_message=message,
-                    mode=mode,
-                )
-            figure_prepared = len(figures)
-            # 用原图目录覆盖 assets 再跑，避免对已打码图二次扫描
-            originals = self._storage.get_redaction_originals_dir(minute_token)
-            restored: list[PreparedFigure] = []
-            for fig in figures:
-                original = originals / f"{fig.figure_id}.jpg"
-                if original.is_file():
-                    shutil.copy2(original, fig.path)
-                if fig.path.is_file():
-                    restored.append(fig)
-            figures, redaction_meta = await self._run_redaction(minute_token, restored)
-            self._persist_manifest(minute_token, figures)
-            # 更新 meta 中的脱敏统计，保留正文
-            existing = self._storage.read_summary(minute_token)
-            content = (existing or {}).get("content") or ""
-            meta = dict((existing or {}).get("meta") or {})
-            meta.update(redaction_meta)
-            meta["redacted_at"] = datetime.now(timezone.utc).isoformat()
-            meta["run_mode"] = mode
-            if existing is not None:
-                self._storage.save_summary(minute_token, content, meta)
-            summary_broker.complete(minute_token, content, meta)
-            logger.info(
-                "仅脱敏完成 token=%s 扫描 %d / 打码 %d / 放弃 %d",
-                minute_token,
-                redaction_meta["figure_scanned"],
-                redaction_meta["figure_redacted"],
-                redaction_meta["figure_abandoned"],
+            await update_job(
+                job_id,
+                status=result.status,
+                stage="DONE",
+                percent=100.0,
+                error_message=result.error_message,
+                finished=True,
             )
-            return SummaryResult(
-                minute_token=minute_token,
-                status=SummaryStatus.COMPLETED.value,
-                char_count=len(content),
-                figure_planned=figure_prepared,
-                figure_used=len(figures),
-                mode=mode,
+            return result
+        except Exception as exc:
+            await update_job(
+                job_id,
+                status="FAILED",
+                stage="FAILED",
+                error_message=str(exc),
+                finished=True,
             )
-
-        # WRITE：跳过抽帧与脱敏，直接成文
-        figures = self._load_prepared_figures(minute_token)
-        figure_prepared = len(figures)
-        return await self._write_summary(
-            minute_token,
-            transcript,
-            figures,
-            figure_prepared=figure_prepared,
-            redaction_meta=redaction_meta,
-            mode=mode,
-        )
+            raise
 
 
 summary_generation_service = SummaryGenerationService()

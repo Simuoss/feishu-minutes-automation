@@ -5,14 +5,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.core.async_bridge import run_async
 from app.core.config import settings
-from app.service.figure_audit import (
-    load_json,
-    parse_regions_from_request,
-    save_json,
-)
+from app.service.figure_audit import parse_regions_from_request
 from app.service.image_mosaic import mosaic_file
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.metadata_db_service import (
+    read_redaction_audit,
+    replace_redaction_from_audit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,15 @@ class RedactionReviewService:
         self._storage = storage or MeetingStorageService()
 
     def read_audit(self, minute_token: str) -> dict[str, Any] | None:
-        return load_json(self._storage.get_redaction_audit_path(minute_token))
+        try:
+            return run_async(read_redaction_audit(minute_token))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "从 DB 读脱敏审计失败 token=%s；怀疑 schema 未就绪。err=%s",
+                minute_token,
+                exc,
+            )
+            return None
 
     def _upsert_figure(self, audit: dict[str, Any], figure: dict[str, Any]) -> dict[str, Any]:
         figures = list(audit.get("figures") or [])
@@ -49,6 +58,9 @@ class RedactionReviewService:
         audit["abandoned"] = abandoned
         audit["scanned"] = len(figures)
         return audit
+
+    def _persist_audit(self, minute_token: str, audit: dict[str, Any]) -> None:
+        run_async(replace_redaction_from_audit(minute_token, audit))
 
     def approve(
         self,
@@ -111,7 +123,7 @@ class RedactionReviewService:
             "asset_relative": f"assets/{figure_id}.jpg",
         }
         audit = self._upsert_figure(audit, figure)
-        save_json(self._storage.get_redaction_audit_path(minute_token), audit)
+        self._persist_audit(minute_token, audit)
         logger.info("人工放行脱敏配图 token=%s figure=%s", minute_token, figure_id)
         return audit
 
@@ -142,14 +154,13 @@ class RedactionReviewService:
             "original_relative": f"agent/redaction/originals/{figure_id}.jpg",
             "asset_relative": None,
         }
-        # 保留已有 regions（若有）
         for item in audit.get("figures") or []:
             if isinstance(item, dict) and item.get("figure_id") == figure_id:
                 figure["regions"] = item.get("regions") or []
                 figure["attempts"] = item.get("attempts") or []
                 break
         audit = self._upsert_figure(audit, figure)
-        save_json(self._storage.get_redaction_audit_path(minute_token), audit)
+        self._persist_audit(minute_token, audit)
         logger.info(
             "人工放弃配图 token=%s figure=%s reason=%s",
             minute_token,

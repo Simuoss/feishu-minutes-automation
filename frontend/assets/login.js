@@ -2,19 +2,30 @@ const params = new URLSearchParams(location.search);
 const next = params.get("next") || "/";
 
 async function tryLogin() {
-  const input = $("#admin-token-input");
+  const tokenInput = $("#admin-token-input");
+  const userInput = $("#admin-username-input");
+  const passInput = $("#admin-password-input");
   const err = $("#login-error");
-  const token = (input.value || "").trim();
   err.classList.add("hidden");
-  if (!token) {
-    err.textContent = "请输入管理员口令";
+
+  const token = (tokenInput?.value || "").trim();
+  const username = (userInput?.value || "").trim();
+  const password = (passInput?.value || "").trim();
+
+  const body = token
+    ? { token }
+    : { username: username || "admin", password };
+
+  if (!token && !password) {
+    err.textContent = "请输入管理员口令，或用户名与密码";
     err.classList.remove("hidden");
     return;
   }
+
   const res = await fetch(`${API}/auth/admin/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -22,7 +33,14 @@ async function tryLogin() {
     err.classList.remove("hidden");
     return;
   }
-  setAdminToken(token);
+  const data = await res.json().catch(() => ({}));
+  const bearer = (data.token || token || password || "").trim();
+  if (!bearer) {
+    err.textContent = "登录成功但未返回可用口令，请检查 ADMIN_TOKEN 配置";
+    err.classList.remove("hidden");
+    return;
+  }
+  setAdminToken(bearer);
   location.replace(next.startsWith("/") ? next : "/");
 }
 
@@ -31,7 +49,11 @@ if (getAdminToken()) {
 }
 
 $("#login-btn").addEventListener("click", tryLogin);
-$("#admin-token-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") tryLogin();
+["#admin-token-input", "#admin-username-input", "#admin-password-input"].forEach((sel) => {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") tryLogin();
+  });
 });
-$("#admin-token-input").focus();
+($("#admin-token-input") || $("#admin-password-input"))?.focus();

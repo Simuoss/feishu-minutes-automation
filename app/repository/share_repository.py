@@ -13,6 +13,7 @@ def _to_entity(orm: ShareORM) -> ShareEntity:
         access_mode=orm.access_mode,
         allow_export=orm.allow_export,
         access_key_id=orm.access_key_id,
+        owner_user_id=orm.owner_user_id,
         created_at=orm.created_at,
         revoked_at=orm.revoked_at,
     )
@@ -29,6 +30,7 @@ class ShareRepository:
             access_mode=entity.access_mode,
             allow_export=entity.allow_export,
             access_key_id=entity.access_key_id,
+            owner_user_id=entity.owner_user_id,
             created_at=entity.created_at,
             revoked_at=None,
         )
@@ -166,3 +168,14 @@ class ShareRepository:
         await self._session.flush()
         await self._session.refresh(orm)
         return _to_entity(orm)
+
+    async def backfill_null_owner(self, owner_user_id: int) -> int:
+        stmt = select(ShareORM).where(ShareORM.owner_user_id.is_(None))
+        result = await self._session.execute(stmt)
+        count = 0
+        for orm in result.scalars().all():
+            orm.owner_user_id = owner_user_id
+            count += 1
+        if count:
+            await self._session.flush()
+        return count

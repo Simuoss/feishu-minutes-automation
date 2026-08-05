@@ -101,8 +101,7 @@ def test_generate_writes_summary_and_snaps_anchor(tmp_path: Path):
     assert "`00:34:52`" in saved["content"]
     assert "`00:35:00`" not in saved["content"]
 
-    meta_path = tmp_path / TOKEN / "output" / "summary.meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = saved["meta"]
     assert meta["anchor_aligned"] == 1
     assert meta["input_tokens"] == 1000
     assert meta["truncated"] is False

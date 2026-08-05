@@ -78,7 +78,22 @@ class ExportService:
             name = name[len("assets/") :]
         if not name or "/" in name or "\\" in name:
             return None
-        return self._storage.resolve_asset_path(minute_token, name)
+        local = self._storage.resolve_asset_path(minute_token, name)
+        if local is not None:
+            return local
+        from app.core.async_bridge import run_async
+        from app.service.r2_media_service import r2_media_service
+
+        try:
+            return run_async(r2_media_service.materialize_asset(minute_token, name))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "导出时从 R2 物化配图失败 token=%s file=%s，该图将跳过。err=%s",
+                minute_token,
+                name,
+                exc,
+            )
+            return None
 
     def _summary_to_docx(self, minute_token: str, markdown: str, title: str) -> bytes:
         from docx import Document

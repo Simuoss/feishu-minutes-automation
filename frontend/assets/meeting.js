@@ -1027,10 +1027,24 @@ async function openDetail(minuteToken) {
     (data.media_files || []).forEach((mf) => {
       hasContent = true;
       const label = escapeHtml(mf.name);
-      // 管理端始终走当前 apiBase（同域 /api），不要用后端返回的绝对地址
-      const mediaUrl = withAccessTicketQuery(
-        `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
-      );
+      // R2 预签名为绝对 URL，不可再拼 access_ticket；否则签名失效
+      let mediaUrl = mf.url || "";
+      if (/^https?:\/\//i.test(mediaUrl)) {
+        try {
+          const target = new URL(mediaUrl);
+          const apiHost = new URL(API).host;
+          if (target.host === apiHost) {
+            mediaUrl = withAccessTicketQuery(mediaUrl);
+          }
+        } catch {
+          /* keep as-is */
+        }
+      } else {
+        mediaUrl = withAccessTicketQuery(
+          mediaUrl ||
+            `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
+        );
+      }
       if (mf.kind === "video") {
         mediaEl.insertAdjacentHTML(
           "beforeend",

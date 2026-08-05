@@ -76,6 +76,19 @@ class R2Client:
         logger.info("已上传到 R2 key=%s size=%s etag=%s", key, local_path.stat().st_size, etag)
         return etag
 
+    async def download_file(self, key: str, local_path: Path) -> Path:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        async with self._client() as client:
+            await client.download_file(
+                Bucket=settings.r2_bucket.strip(),
+                Key=key,
+                Filename=str(local_path),
+            )
+        if not local_path.is_file():
+            raise R2ClientError(f"从 R2 下载后本地文件不存在 key={key}")
+        logger.info("已从 R2 下载 key=%s -> %s", key, local_path)
+        return local_path
+
     async def exists(self, key: str) -> bool:
         try:
             async with self._client() as client:

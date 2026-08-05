@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     # 管理端访问口令；前端登录后以 Bearer 携带
     admin_token: str = ""
+    # 种子用户 admin 的初始密码；空则回退 ADMIN_TOKEN
+    bootstrap_admin_password: str = ""
 
     app_host: str = "0.0.0.0"
     app_port: int = 7354

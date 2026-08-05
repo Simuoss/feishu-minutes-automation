@@ -24,6 +24,12 @@ def _to_entity(orm: MeetingRecordORM) -> MeetingRecordEntity:
         status=orm.status,
         error_message=orm.error_message,
         storage_path=orm.storage_path,
+        owner_user_id=orm.owner_user_id,
+        summary_status=orm.summary_status,
+        media_relpath=orm.media_relpath,
+        transcript_relpath=orm.transcript_relpath,
+        downloaded_at=orm.downloaded_at,
+        storage_root_relpath=orm.storage_root_relpath,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
     )
@@ -46,6 +52,12 @@ class MeetingRecordRepository:
             status=entity.status,
             error_message=entity.error_message,
             storage_path=entity.storage_path,
+            owner_user_id=entity.owner_user_id,
+            summary_status=entity.summary_status,
+            media_relpath=entity.media_relpath,
+            transcript_relpath=entity.transcript_relpath,
+            downloaded_at=entity.downloaded_at,
+            storage_root_relpath=entity.storage_root_relpath,
         )
         self._session.add(orm)
         await self._session.flush()
@@ -56,25 +68,61 @@ class MeetingRecordRepository:
         orm = await self._session.get(MeetingRecordORM, entity.id)
         if orm is None:
             return None
-        if entity.minute_token is not None:
-            orm.minute_token = entity.minute_token
-        if entity.meeting_id is not None:
-            orm.meeting_id = entity.meeting_id
-        if entity.title is not None:
-            orm.title = entity.title
-        if entity.duration_ms is not None:
-            orm.duration_ms = entity.duration_ms
-        if entity.has_video is not None:
-            orm.has_video = entity.has_video
-        if entity.status is not None:
-            orm.status = entity.status
-        if entity.error_message is not None:
-            orm.error_message = entity.error_message
-        if entity.storage_path is not None:
-            orm.storage_path = entity.storage_path
+        for field in (
+            "minute_token",
+            "meeting_id",
+            "title",
+            "duration_ms",
+            "has_video",
+            "status",
+            "error_message",
+            "storage_path",
+            "owner_user_id",
+            "summary_status",
+            "media_relpath",
+            "transcript_relpath",
+            "downloaded_at",
+            "storage_root_relpath",
+            "unique_key",
+        ):
+            value = getattr(entity, field)
+            if value is not None:
+                setattr(orm, field, value)
         await self._session.flush()
         await self._session.refresh(orm)
         return _to_entity(orm)
+
+    async def upsert_by_minute_token(
+        self, entity: MeetingRecordCreateEntity
+    ) -> MeetingRecordEntity:
+        """按 minute_token 合并会议主档；无 feishu_event_id 冲突时用于文件回填。"""
+        token = (entity.minute_token or "").strip()
+        if not token:
+            return await self.create(entity)
+        existing = await self.get_latest_by_minute_token(token)
+        if existing is None or existing.id is None:
+            return await self.create(entity)
+        updated = await self.update(
+            MeetingRecordUpdateEntity(
+                id=existing.id,
+                minute_token=entity.minute_token,
+                meeting_id=entity.meeting_id,
+                title=entity.title,
+                duration_ms=entity.duration_ms,
+                has_video=entity.has_video,
+                status=entity.status,
+                error_message=entity.error_message,
+                storage_path=entity.storage_path,
+                owner_user_id=entity.owner_user_id,
+                summary_status=entity.summary_status,
+                media_relpath=entity.media_relpath,
+                transcript_relpath=entity.transcript_relpath,
+                downloaded_at=entity.downloaded_at,
+                storage_root_relpath=entity.storage_root_relpath,
+                unique_key=entity.unique_key,
+            )
+        )
+        return updated or existing
 
     async def get_by_id(self, record_id: int) -> MeetingRecordEntity | None:
         orm = await self._session.get(MeetingRecordORM, record_id)
@@ -128,5 +176,9 @@ class MeetingRecordRepository:
             stmt = stmt.where(MeetingRecordORM.unique_key == query.unique_key)
         if query.status is not None:
             stmt = stmt.where(MeetingRecordORM.status == query.status)
+        if query.summary_status is not None:
+            stmt = stmt.where(MeetingRecordORM.summary_status == query.summary_status)
+        if query.owner_user_id is not None:
+            stmt = stmt.where(MeetingRecordORM.owner_user_id == query.owner_user_id)
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]

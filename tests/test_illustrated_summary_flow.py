@@ -263,8 +263,7 @@ def test_unreferenced_figure_is_deleted_from_disk(tmp_path: Path):
     assert result.figure_planned == 2
     assert result.figure_used == 1
 
-    meta_path = tmp_path / TOKEN / "output" / "summary.meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = storage.read_summary(TOKEN)["meta"]
     assert meta["figure_used"] == 1
 
 

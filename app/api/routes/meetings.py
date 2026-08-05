@@ -3,7 +3,7 @@ import mimetypes
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from app.core.config import settings
 from app.dto.feishu.meeting import (
@@ -23,6 +23,7 @@ from app.service.download_progress_store import download_progress_store
 from app.service.meeting_download_service import MeetingDownloadService
 from app.service.meeting_list_service import MeetingListService
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.r2_media_service import r2_media_service
 
 logger = logging.getLogger(__name__)
 
@@ -196,21 +197,52 @@ async def get_local_meeting(minute_token: str) -> LocalMeetingDetailResponse:
     detail = _list_service.get_local_meeting(minute_token)
     if detail is None:
         raise HTTPException(status_code=404, detail="本地未找到该会议资源")
+
+    media_files = list(detail.get("media_files") or [])
+    signed_video = await r2_media_service.presign_share_video(minute_token)
+    has_video = bool(detail.get("has_video"))
+    if signed_video:
+        has_video = True
+        video_meta = (r2_media_service.read_meta(minute_token).get("video") or {})
+        source_name = str(video_meta.get("source_name") or "video.mp4")
+        replaced = False
+        for mf in media_files:
+            if mf.get("kind") == "video":
+                mf["url"] = signed_video
+                replaced = True
+        if not replaced:
+            media_files.append(
+                {"name": source_name, "kind": "video", "url": signed_video}
+            )
+
     return LocalMeetingDetailResponse(
         minute_token=detail["minute_token"],
         title=detail.get("title"),
         duration_ms=detail.get("duration_ms"),
-        has_video=detail.get("has_video"),
-        media_files=[LocalMediaFileResponse(**mf) for mf in detail.get("media_files", [])],
+        has_video=has_video,
+        media_files=[LocalMediaFileResponse(**mf) for mf in media_files],
         transcript=detail.get("transcript"),
         downloaded_at=detail.get("downloaded_at"),
     )
 
 
 @router.get("/local/{minute_token}/media/{filename}")
-async def get_local_media(minute_token: str, filename: str) -> FileResponse:
+async def get_local_media(minute_token: str, filename: str):
+    """本地媒体；视频若已上云则 302 到 R2。"""
     path = _storage.resolve_media_path(minute_token, filename)
     if path is None:
+        signed = await r2_media_service.presign_share_video(minute_token)
+        if signed:
+            return RedirectResponse(url=signed, status_code=302)
         raise HTTPException(status_code=404, detail="媒体文件不存在")
+    # 视频已在云上时优先云播放，并顺带清理残留本地原片
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".mov", ".webm", ".mkv"} and r2_media_service.video_ready(
+        minute_token
+    ):
+        signed = await r2_media_service.presign_share_video(minute_token)
+        if signed:
+            r2_media_service.purge_local_videos(minute_token)
+            return RedirectResponse(url=signed, status_code=302)
     media_type, _ = mimetypes.guess_type(path.name)
     return FileResponse(path, media_type=media_type or "application/octet-stream", filename=path.name)

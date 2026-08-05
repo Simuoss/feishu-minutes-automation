@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from app.dto.summary import (
     GenerateSummaryRequest,
@@ -49,9 +49,20 @@ def _meta_to_dto(meta: dict[str, Any]) -> SummaryMetaData:
     )
 
 
-def _build_metrics(minute_token: str) -> SummaryMetricsResponse:
+async def _build_metrics(minute_token: str) -> SummaryMetricsResponse:
+    from app.service.metadata_db_service import read_r2_meta, read_summary_meta
+
     detail = _storage.read_summary(minute_token)
-    meta = (detail or {}).get("meta") or {}
+    try:
+        meta = await read_summary_meta(minute_token) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "从 DB 读纪要指标失败 token=%s；怀疑 schema 未就绪。err=%s",
+            minute_token,
+            exc,
+        )
+        meta = (detail or {}).get("meta") or {}
+
     suspicious = meta.get("anchor_suspicious")
     if isinstance(suspicious, list):
         suspicious_count = len(suspicious)
@@ -68,15 +79,16 @@ def _build_metrics(minute_token: str) -> SummaryMetricsResponse:
 
     r2_count = None
     try:
-        r2_meta = r2_media_service.read_meta(minute_token)
+        r2_meta = await read_r2_meta(minute_token) or {"assets": {}}
         assets = r2_meta.get("assets") or {}
         r2_count = len(assets) if isinstance(assets, dict) else None
     except Exception:  # noqa: BLE001
         r2_count = None
 
+    has_summary = detail is not None or bool(meta.get("generated_at") or meta.get("summary_chars"))
     return SummaryMetricsResponse(
         minute_token=minute_token,
-        has_summary=detail is not None,
+        has_summary=has_summary,
         model=meta.get("model"),
         input_tokens=input_tokens if isinstance(input_tokens, int) else None,
         output_tokens=output_tokens if isinstance(output_tokens, int) else None,
@@ -116,8 +128,8 @@ def _audit_to_response(minute_token: str, audit: dict[str, Any]) -> RedactionAud
             original_url = f"/api/v1/meetings/{minute_token}/redaction/originals/{figure_id}.jpg"
         if asset_rel:
             name = str(asset_rel).rsplit("/", 1)[-1]
-            if _storage.resolve_asset_path(minute_token, name):
-                asset_url = f"/api/v1/meetings/{minute_token}/summary/assets/{name}"
+            # 路由层会优先 302 到 R2，不依赖本地文件仍在
+            asset_url = f"/api/v1/meetings/{minute_token}/summary/assets/{name}"
         figures.append(
             RedactionFigureData(
                 figure_id=figure_id,
@@ -203,16 +215,15 @@ async def get_summary_progress_batch(
 
 @router.get("/{minute_token}/summary/metrics", response_model=SummaryMetricsResponse)
 async def get_summary_metrics(minute_token: str) -> SummaryMetricsResponse:
-    return _build_metrics(minute_token)
+    return await _build_metrics(minute_token)
 
 
 @router.post("/summary/metrics/batch", response_model=SummaryMetricsBatchResponse)
 async def get_summary_metrics_batch(
     body: SummaryMetricsBatchRequest,
 ) -> SummaryMetricsBatchResponse:
-    return SummaryMetricsBatchResponse(
-        items=[_build_metrics(token) for token in body.minute_tokens]
-    )
+    items = [await _build_metrics(token) for token in body.minute_tokens]
+    return SummaryMetricsBatchResponse(items=items)
 
 
 @router.get("/{minute_token}/summary/stream")
@@ -236,8 +247,11 @@ async def stream_summary(minute_token: str) -> StreamingResponse:
 
 
 @router.get("/{minute_token}/summary/assets/{filename}")
-async def get_summary_asset(minute_token: str, filename: str) -> FileResponse:
-    """提供纪要正文里引用的截图。"""
+async def get_summary_asset(minute_token: str, filename: str):
+    """提供纪要正文里引用的截图；优先 R2 预签名。"""
+    signed = await r2_media_service.presign_asset(minute_token, filename)
+    if signed:
+        return RedirectResponse(url=signed, status_code=302)
     asset_path = _storage.resolve_asset_path(minute_token, filename)
     if asset_path is None:
         raise HTTPException(status_code=404, detail="配图不存在")
@@ -295,6 +309,7 @@ async def approve_redaction(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await r2_media_service.sync_assets_safe(minute_token)
     return RedactionActionResponse(
         minute_token=minute_token,
         figure_id=body.figure_id,

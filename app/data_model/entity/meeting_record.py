@@ -16,6 +16,12 @@ class MeetingRecordEntity:
     status: str
     error_message: str | None
     storage_path: str | None
+    owner_user_id: int | None
+    summary_status: str | None
+    media_relpath: str | None
+    transcript_relpath: str | None
+    downloaded_at: int | None
+    storage_root_relpath: str | None
     created_at: datetime | None
     updated_at: datetime | None
 
@@ -33,6 +39,12 @@ class MeetingRecordCreateEntity:
     status: str = "PENDING"
     error_message: str | None = None
     storage_path: str | None = None
+    owner_user_id: int | None = None
+    summary_status: str | None = None
+    media_relpath: str | None = None
+    transcript_relpath: str | None = None
+    downloaded_at: int | None = None
+    storage_root_relpath: str | None = None
 
 
 @dataclass
@@ -46,6 +58,13 @@ class MeetingRecordUpdateEntity:
     status: str | None = None
     error_message: str | None = None
     storage_path: str | None = None
+    owner_user_id: int | None = None
+    summary_status: str | None = None
+    media_relpath: str | None = None
+    transcript_relpath: str | None = None
+    downloaded_at: int | None = None
+    storage_root_relpath: str | None = None
+    unique_key: str | None = None
 
 
 @dataclass
@@ -55,3 +74,5 @@ class MeetingRecordQueryEntity:
     minute_token: str | None = None
     unique_key: str | None = None
     status: str | None = None
+    summary_status: str | None = None
+    owner_user_id: int | None = None

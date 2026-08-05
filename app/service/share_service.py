@@ -96,6 +96,9 @@ class ShareService:
         if self._storage.read_meta(minute_token) is None:
             raise LookupError("本地未找到该会议，请先下载")
 
+        from app.service.metadata_db_service import get_admin_user_id
+
+        owner_id = await get_admin_user_id()
         entity = ShareCreateEntity(
             share_token=secrets.token_urlsafe(16),
             minute_token=minute_token,
@@ -103,6 +106,7 @@ class ShareService:
             allow_export=allow_export,
             access_key_id=access_key_id,
             created_at=utc_now_ms(),
+            owner_user_id=owner_id,
         )
         async with UnitOfWork() as uow:
             assert uow.shares is not None
@@ -131,6 +135,9 @@ class ShareService:
         if not ordered_tokens:
             raise ValueError("minute_tokens 不能为空")
 
+        from app.service.metadata_db_service import get_admin_user_id
+
+        owner_id = await get_admin_user_id()
         async with UnitOfWork() as uow:
             assert uow.shares is not None
             existing = await uow.shares.list_active_by_minutes(ordered_tokens)
@@ -182,6 +189,7 @@ class ShareService:
                         allow_export=allow_export,
                         access_key_id=access_key_id,
                         created_at=now,
+                        owner_user_id=owner_id,
                     )
                 )
                 created_now[minute_token] = created

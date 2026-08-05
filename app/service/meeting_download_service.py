@@ -143,6 +143,9 @@ class MeetingDownloadService:
                     error_message=dup.error_message,
                 )
 
+            from app.service.metadata_db_service import get_admin_user_id
+
+            owner_id = await get_admin_user_id()
             record = await uow.meeting_records.create(
                 MeetingRecordCreateEntity(
                     feishu_event_id=event_id,
@@ -151,6 +154,8 @@ class MeetingDownloadService:
                     minute_token=minute_token,
                     status="DOWNLOADING",
                     storage_path=str(self._storage.get_meeting_dir(minute_token)),
+                    owner_user_id=owner_id,
+                    storage_root_relpath=minute_token,
                 )
             )
             record_id = record.id
@@ -159,10 +164,16 @@ class MeetingDownloadService:
             await uow.commit()
 
         download_progress_store.start(minute_token)
+        from app.service.pipeline_job_service import start_job, update_job
+
+        job_id = await start_job(
+            minute_token, job_type="DOWNLOAD", stage="START", max_attempts=max(1, ready_retries)
+        )
         attempts = max(1, ready_retries)
         last_error: BaseException | None = None
         for attempt in range(1, attempts + 1):
             try:
+                await update_job(job_id, stage="DOWNLOADING", percent=10.0)
                 await self._download_and_store(
                     record_id,
                     minute_token,
@@ -172,6 +183,7 @@ class MeetingDownloadService:
                     fetch_transcript=fetch_transcript,
                 )
                 download_progress_store.complete(minute_token)
+                await update_job(job_id, status="COMPLETED", stage="DONE", percent=100.0, finished=True)
                 self._spawn_auto_summary(minute_token)
                 self._spawn_r2_share_video(minute_token)
                 return DownloadResult(
@@ -208,6 +220,13 @@ class MeetingDownloadService:
         assert last_error is not None
         err = parse_feishu_api_error(last_error)
         download_progress_store.fail(minute_token, err.message)
+        await update_job(
+            job_id,
+            status="FAILED",
+            stage="FAILED",
+            error_message=err.message,
+            finished=True,
+        )
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
             await uow.meeting_records.update(
@@ -336,6 +355,9 @@ class MeetingDownloadService:
                     has_video=has_video,
                     status="COMPLETED",
                     storage_path=str(layout["base"]),
+                    media_relpath=str(media_path) if media_path else None,
+                    transcript_relpath=str(transcript_path) if transcript_path else None,
+                    storage_root_relpath=minute_token,
                 )
             )
             await uow.commit()

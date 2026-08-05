@@ -10,6 +10,7 @@ class AccessKeyEntity:
     expires_at: int
     created_at: int
     revoked_at: int | None
+    owner_user_id: int | None
 
 
 @dataclass
@@ -19,6 +20,7 @@ class AccessKeyCreateEntity:
     key_prefix: str
     expires_at: int
     created_at: int
+    owner_user_id: int | None = None
 
 
 @dataclass

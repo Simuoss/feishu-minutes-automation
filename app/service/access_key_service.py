@@ -30,12 +30,16 @@ class AccessKeyService:
             raise ValueError("过期时间必须晚于当前时间")
 
         plaintext = generate_access_key_plaintext()
+        from app.service.metadata_db_service import get_admin_user_id
+
+        owner_id = await get_admin_user_id()
         entity = AccessKeyCreateEntity(
             name=name,
             key_hash=hash_access_key(plaintext),
             key_prefix=plaintext[:10],
             expires_at=expires_at,
             created_at=now,
+            owner_user_id=owner_id,
         )
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None

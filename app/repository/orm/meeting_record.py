@@ -1,12 +1,14 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db_base import Base
 
 
 class MeetingRecordORM(Base):
+    """会议主档（原下载流水表扩展）：status 表示下载状态。"""
+
     __tablename__ = "meeting_records"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -21,6 +23,12 @@ class MeetingRecordORM(Base):
     status: Mapped[str] = mapped_column(String(32), index=True, default="PENDING")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    summary_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    media_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    transcript_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    downloaded_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    storage_root_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

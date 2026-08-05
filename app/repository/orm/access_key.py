@@ -14,3 +14,4 @@ class AccessKeyORM(Base):
     expires_at: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[int] = mapped_column(BigInteger)
     revoked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

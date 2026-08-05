@@ -18,6 +18,7 @@ def _to_entity(orm: AccessKeyORM) -> AccessKeyEntity:
         expires_at=orm.expires_at,
         created_at=orm.created_at,
         revoked_at=orm.revoked_at,
+        owner_user_id=orm.owner_user_id,
     )
 
 
@@ -33,6 +34,7 @@ class AccessKeyRepository:
             expires_at=entity.expires_at,
             created_at=entity.created_at,
             revoked_at=None,
+            owner_user_id=entity.owner_user_id,
         )
         self._session.add(orm)
         await self._session.flush()
@@ -74,3 +76,14 @@ class AccessKeyRepository:
         await self._session.flush()
         await self._session.refresh(orm)
         return _to_entity(orm)
+
+    async def backfill_null_owner(self, owner_user_id: int) -> int:
+        stmt = select(AccessKeyORM).where(AccessKeyORM.owner_user_id.is_(None))
+        result = await self._session.execute(stmt)
+        count = 0
+        for orm in result.scalars().all():
+            orm.owner_user_id = owner_user_id
+            count += 1
+        if count:
+            await self._session.flush()
+        return count

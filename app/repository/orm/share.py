@@ -13,5 +13,6 @@ class ShareORM(Base):
     access_mode: Mapped[str] = mapped_column(String(32), index=True)
     allow_export: Mapped[bool] = mapped_column(Boolean, default=False)
     access_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[int] = mapped_column(BigInteger)
     revoked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
