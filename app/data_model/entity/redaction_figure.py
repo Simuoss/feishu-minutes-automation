@@ -5,6 +5,7 @@ from typing import Any
 @dataclass
 class RedactionFigureEntity:
     id: int | None
+    owner_user_id: int
     minute_token: str
     figure_id: str
     sensitive: bool
@@ -18,6 +19,7 @@ class RedactionFigureEntity:
 
 @dataclass
 class RedactionFigureUpsertEntity:
+    owner_user_id: int
     minute_token: str
     figure_id: str
     sensitive: bool = False

@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Boolean, Float, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db_base import Base
@@ -6,9 +6,15 @@ from app.core.db_base import Base
 
 class SummaryRunORM(Base):
     __tablename__ = "summary_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id", "minute_token", name="uq_summary_runs_owner_token"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    minute_token: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    minute_token: Mapped[str] = mapped_column(String(32), index=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

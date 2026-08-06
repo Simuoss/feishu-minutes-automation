@@ -19,6 +19,7 @@ from app.service.summary_event_broker import SummaryStatus, summary_broker
 from app.service.summary_generation_service import SummaryGenerationService
 
 TOKEN = "obillus0001"
+OWNER = 1
 
 TRANSCRIPT = """2026-07-21 20:58:04 CST|1小时 3秒
 
@@ -204,8 +205,10 @@ class FakeFfmpeg:
 
 def _make_storage(tmp_path: Path, *, media_name: str | None = "lecture.mp4") -> MeetingStorageService:
     storage = MeetingStorageService(storage_root=str(tmp_path))
-    layout = storage.ensure_layout(TOKEN)
-    storage.save_transcript(TOKEN, TRANSCRIPT.encode("utf-8"))
+    layout = storage.ensure_layout(TOKEN, owner_user_id=OWNER)
+    storage.save_transcript(
+        TOKEN, TRANSCRIPT.encode("utf-8"), owner_user_id=OWNER
+    )
     if media_name:
         # save_media 会走真实下载，这里直接把文件摆好
         (layout["media"] / media_name).write_bytes(b"fake-media-bytes")
@@ -217,11 +220,11 @@ def _service(storage, llm, ffmpeg) -> SummaryGenerationService:
 
 
 def test_writing_call_receives_transcript_and_images_together(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     # 三次调用：规划截图 -> 敏感扫描 -> 看图成文
@@ -251,41 +254,41 @@ def test_writing_call_receives_transcript_and_images_together(tmp_path: Path):
 
 
 def test_unreferenced_figure_is_deleted_from_disk(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
-    assets = storage.get_assets_dir(TOKEN)
+    assets = storage.get_assets_dir(TOKEN, owner_user_id=OWNER)
     assert (assets / "fig-01.jpg").is_file()
     assert not (assets / "fig-02.jpg").exists()
     assert result.figure_planned == 2
     assert result.figure_used == 1
 
-    meta = storage.read_summary(TOKEN)["meta"]
+    meta = storage.read_summary(TOKEN, owner_user_id=OWNER)["meta"]
     assert meta["figure_used"] == 1
 
 
 def test_candidate_frames_are_cleaned_up(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT)
 
-    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     # 中间候选帧不该留在磁盘上，也不该出现在对外暴露的 assets 目录里
-    assert not storage.get_frames_work_dir(TOKEN).exists()
-    names = {f.name for f in storage.get_assets_dir(TOKEN).iterdir()}
+    assert not storage.get_frames_work_dir(TOKEN, owner_user_id=OWNER).exists()
+    names = {f.name for f in storage.get_assets_dir(TOKEN, owner_user_id=OWNER).iterdir()}
     assert names == {"fig-01.jpg"}
 
 
 def test_audio_only_meeting_falls_back_to_text_summary(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path, media_name="lecture.mp3")
     llm = ScriptedLlm(WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     # 没有视频就不该有规划截图那一次调用
@@ -295,26 +298,26 @@ def test_audio_only_meeting_falls_back_to_text_summary(tmp_path: Path):
 
 
 def test_probe_failure_degrades_to_text_summary(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(WRITE_OUTPUT)
 
     result = asyncio.run(
-        _service(storage, llm, FakeFfmpeg(probe_error=True)).generate(TOKEN)
+        _service(storage, llm, FakeFfmpeg(probe_error=True)).generate(TOKEN, owner_user_id=OWNER)
     )
 
     assert result.status == SummaryStatus.COMPLETED.value
     assert len(llm.calls) == 1
     assert result.figure_used == 0
-    assert storage.read_summary(TOKEN) is not None
+    assert storage.read_summary(TOKEN, owner_user_id=OWNER) is not None
 
 
 def test_empty_plan_degrades_to_text_summary(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm('{"figures": []}', WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     assert len(llm.calls) == 2
@@ -323,11 +326,11 @@ def test_empty_plan_degrades_to_text_summary(tmp_path: Path):
 
 
 def test_non_json_plan_output_degrades_to_text_summary(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm("这节课没什么需要截图的。", WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     assert llm.calls[1]["images"] == []
@@ -336,11 +339,11 @@ def test_non_json_plan_output_degrades_to_text_summary(tmp_path: Path):
 
 def test_identical_sample_frames_still_ask_model(tmp_path: Path):
     """画面是否共享只由模型看抽帧判断，算法不再因帧相似而跳过规划。"""
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(NO_SHARE_PLAN, WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     assert len(llm.calls) == 2
@@ -351,7 +354,7 @@ def test_identical_sample_frames_still_ask_model(tmp_path: Path):
 
 def test_plan_candidates_are_streamed_to_subscribers(tmp_path: Path):
     """规划阶段每挑中一处就该推一条，前端才不用干等几十秒。"""
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     service = _service(
         storage, ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT), FakeFfmpeg()
@@ -361,14 +364,14 @@ def test_plan_candidates_are_streamed_to_subscribers(tmp_path: Path):
         received: list[dict[str, Any]] = []
 
         async def listen():
-            async for item in summary_broker.subscribe(TOKEN):
+            async for item in summary_broker.subscribe(TOKEN, owner_user_id=OWNER):
                 received.append(item)
                 if item["event"] in {"done", "failed"}:
                     return
 
         listener = asyncio.create_task(listen())
         await asyncio.sleep(0)
-        await service.generate(TOKEN)
+        await service.generate(TOKEN, owner_user_id=OWNER)
         await asyncio.wait_for(listener, timeout=5)
         return received
 
@@ -385,27 +388,27 @@ def test_plan_candidates_are_streamed_to_subscribers(tmp_path: Path):
 
 
 def test_snapshot_carries_plan_items_for_late_subscribers(tmp_path: Path):
-    summary_broker.clear(TOKEN)
-    summary_broker.add_plan_item(TOKEN, "00:02:52", "终端里的 pip 报错")
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    summary_broker.add_plan_item(TOKEN, owner_user_id=OWNER, timestamp="00:02:52", expect="终端里的 pip 报错")
 
     async def scenario():
-        async for item in summary_broker.subscribe(TOKEN):
+        async for item in summary_broker.subscribe(TOKEN, owner_user_id=OWNER):
             return item
 
     first = asyncio.run(scenario())
     assert first is not None
     assert first["event"] == "snapshot"
     assert first["data"]["plan_items"][0]["timestamp"] == "00:02:52"
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
 
 
 def test_model_verdict_of_no_screen_share_skips_illustration(tmp_path: Path):
     """开场抽帧差异够大，但模型看样本帧判定无共享屏幕时不配图。"""
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(NO_SHARE_PLAN, WRITE_OUTPUT)
 
-    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    result = asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     # 规划那次调用发生了（带抽帧样本），但写作那次不该带图
@@ -414,37 +417,37 @@ def test_model_verdict_of_no_screen_share_skips_illustration(tmp_path: Path):
     assert llm.calls[1]["images"] == []
     assert "配图" not in str(llm.calls[1]["system_prompt"])
     assert result.figure_planned == 0
-    assert storage.read_summary(TOKEN) is not None
+    assert storage.read_summary(TOKEN, owner_user_id=OWNER) is not None
 
 
 def test_no_screen_share_leaves_no_assets_on_disk(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(NO_SHARE_PLAN, WRITE_OUTPUT)
 
-    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
-    assets = storage.get_assets_dir(TOKEN)
+    assets = storage.get_assets_dir(TOKEN, owner_user_id=OWNER)
     assert not assets.is_dir() or not any(assets.iterdir())
 
 
 def test_screen_activity_check_cleans_up_samples(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT)
 
-    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN))
+    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
-    assert not storage.get_frames_work_dir(TOKEN).exists()
+    assert not storage.get_frames_work_dir(TOKEN, owner_user_id=OWNER).exists()
 
 
 def test_regenerate_clears_previous_assets(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
-    stale = storage.ensure_assets_dir(TOKEN) / "fig-09.jpg"
+    stale = storage.ensure_assets_dir(TOKEN, owner_user_id=OWNER) / "fig-09.jpg"
     stale.write_bytes(b"stale")
 
     llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT)
-    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, force=True))
+    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER, force=True))
 
     assert not stale.exists()

@@ -8,11 +8,15 @@ class RedactionFigureORM(Base):
     __tablename__ = "redaction_figures"
     __table_args__ = (
         UniqueConstraint(
-            "minute_token", "figure_id", name="uq_redaction_figures_token_figure"
+            "owner_user_id",
+            "minute_token",
+            "figure_id",
+            name="uq_redaction_figures_owner_token_figure",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
     minute_token: Mapped[str] = mapped_column(String(32), index=True)
     figure_id: Mapped[str] = mapped_column(String(64))
     sensitive: Mapped[bool] = mapped_column(default=False)

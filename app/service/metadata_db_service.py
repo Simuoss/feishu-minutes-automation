@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,7 +13,7 @@ from app.data_model.entity.redaction_figure import RedactionFigureUpsertEntity
 from app.data_model.entity.summary_run import SummaryRunEntity, SummaryRunUpsertEntity
 from app.repository.uow import UnitOfWork
 
-_admin_user_id: int | None = None
+logger = logging.getLogger(__name__)
 
 
 def _now_ms() -> int:
@@ -40,31 +41,35 @@ def _parse_downloaded_at_ms(raw: Any) -> int | None:
     return None
 
 
-async def get_admin_user_id() -> int | None:
-    global _admin_user_id
-    if _admin_user_id is not None:
-        return _admin_user_id
-    async with UnitOfWork() as uow:
-        assert uow.users is not None
-        user = await uow.users.get_by_username("admin")
-        if user is None or user.id is None:
-            return None
-        _admin_user_id = user.id
-        return _admin_user_id
+def require_owner_user_id(explicit: int | None) -> int:
+    """必须有调用方显式传入的归属用户；禁止 ContextVar / 默认账号回退。"""
+    if explicit is None:
+        raise RuntimeError("缺少 owner_user_id，拒绝写入无归属数据（禁止回退到其他账号）")
+    return int(explicit)
 
 
-async def upsert_meeting_meta(minute_token: str, meta: dict[str, Any]) -> None:
+async def upsert_meeting_meta(
+    minute_token: str,
+    meta: dict[str, Any],
+    *,
+    owner_user_id: int | None = None,
+) -> None:
     token = (minute_token or "").strip()
     if not token:
         return
-    owner_id = await get_admin_user_id()
+    from app.core.resource_key import storage_relpath
+
+    owner_id = require_owner_user_id(owner_user_id)
+    rel = storage_relpath(owner_id, token)
     files = meta.get("files") if isinstance(meta.get("files"), dict) else {}
-    event_id = str(meta.get("feishu_event_id") or f"meta:{token}")
+    event_id = str(meta.get("feishu_event_id") or f"meta:{token}:u{owner_id}")
     async with UnitOfWork() as uow:
         assert uow.meeting_records is not None
         existing = await uow.meeting_records.get_by_event_id(event_id)
         if existing is None:
-            existing = await uow.meeting_records.get_latest_by_minute_token(token)
+            existing = await uow.meeting_records.get_latest_by_minute_token(
+                token, owner_user_id=owner_id
+            )
         entity = MeetingRecordCreateEntity(
             feishu_event_id=event_id if existing is None else existing.feishu_event_id,
             event_type=existing.event_type if existing else "META_BACKFILL",
@@ -79,13 +84,13 @@ async def upsert_meeting_meta(minute_token: str, meta: dict[str, Any]) -> None:
                 if not existing or existing.status in {None, "PENDING", "DOWNLOADING", "FAILED"}
                 else existing.status
             ),
-            storage_path=existing.storage_path if existing else token,
-            owner_user_id=owner_id or (existing.owner_user_id if existing else None),
+            storage_path=existing.storage_path if existing else rel,
+            owner_user_id=owner_id,
             summary_status=existing.summary_status if existing else None,
             media_relpath=files.get("media") if isinstance(files, dict) else None,
             transcript_relpath=files.get("transcript") if isinstance(files, dict) else None,
             downloaded_at=_parse_downloaded_at_ms(meta.get("downloaded_at")),
-            storage_root_relpath=token,
+            storage_root_relpath=rel,
         )
         if existing and existing.id is not None:
             from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
@@ -142,7 +147,10 @@ def summary_run_to_meta(entity: SummaryRunEntity) -> dict[str, Any]:
     }
 
 
-def meta_to_summary_upsert(minute_token: str, meta: dict[str, Any]) -> SummaryRunUpsertEntity:
+def meta_to_summary_upsert(
+    minute_token: str, meta: dict[str, Any], *, owner_user_id: int
+) -> SummaryRunUpsertEntity:
+    owner_id = require_owner_user_id(owner_user_id)
     suspicious = meta.get("anchor_suspicious")
     if isinstance(suspicious, int):
         suspicious_list: list[Any] = []
@@ -151,6 +159,7 @@ def meta_to_summary_upsert(minute_token: str, meta: dict[str, Any]) -> SummaryRu
     else:
         suspicious_list = []
     return SummaryRunUpsertEntity(
+        owner_user_id=owner_id,
         minute_token=minute_token,
         model=meta.get("model"),
         input_tokens=meta.get("input_tokens") if isinstance(meta.get("input_tokens"), int) else None,
@@ -201,15 +210,25 @@ def meta_to_summary_upsert(minute_token: str, meta: dict[str, Any]) -> SummaryRu
     )
 
 
-async def upsert_summary_meta(minute_token: str, meta: dict[str, Any]) -> None:
+async def upsert_summary_meta(
+    minute_token: str,
+    meta: dict[str, Any],
+    *,
+    owner_user_id: int,
+) -> None:
     token = (minute_token or "").strip()
     if not token or not meta:
         return
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.summary_runs is not None
         assert uow.meeting_records is not None
-        await uow.summary_runs.upsert(meta_to_summary_upsert(token, meta))
-        record = await uow.meeting_records.get_latest_by_minute_token(token)
+        await uow.summary_runs.upsert(
+            meta_to_summary_upsert(token, meta, owner_user_id=owner_id)
+        )
+        record = await uow.meeting_records.get_latest_by_minute_token(
+            token, owner_user_id=owner_id
+        )
         if record and record.id is not None:
             from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
 
@@ -220,11 +239,12 @@ async def upsert_summary_meta(minute_token: str, meta: dict[str, Any]) -> None:
 
 
 async def replace_figures_from_manifest(
-    minute_token: str, manifest: dict[str, Any]
+    minute_token: str, manifest: dict[str, Any], *, owner_user_id: int
 ) -> None:
     token = (minute_token or "").strip()
     if not token:
         return
+    owner_id = require_owner_user_id(owner_user_id)
     figures_raw = manifest.get("figures") if isinstance(manifest, dict) else None
     items: list[FigureUpsertEntity] = []
     if isinstance(figures_raw, list):
@@ -237,6 +257,7 @@ async def replace_figures_from_manifest(
             frame_seconds = item.get("frame_seconds")
             items.append(
                 FigureUpsertEntity(
+                    owner_user_id=owner_id,
                     minute_token=token,
                     figure_id=figure_id,
                     relative_path=item.get("relative_path"),
@@ -251,16 +272,17 @@ async def replace_figures_from_manifest(
             )
     async with UnitOfWork() as uow:
         assert uow.figures is not None
-        await uow.figures.replace_for_minute(token, items)
+        await uow.figures.replace_for_minute(token, items, owner_user_id=owner_id)
         await uow.commit()
 
 
 async def replace_redaction_from_audit(
-    minute_token: str, audit: dict[str, Any]
+    minute_token: str, audit: dict[str, Any], *, owner_user_id: int
 ) -> None:
     token = (minute_token or "").strip()
     if not token:
         return
+    owner_id = require_owner_user_id(owner_user_id)
     figures_raw = audit.get("figures") if isinstance(audit, dict) else None
     items: list[RedactionFigureUpsertEntity] = []
     if isinstance(figures_raw, list):
@@ -274,6 +296,7 @@ async def replace_redaction_from_audit(
             attempts = item.get("attempts") if isinstance(item.get("attempts"), list) else []
             items.append(
                 RedactionFigureUpsertEntity(
+                    owner_user_id=owner_id,
                     minute_token=token,
                     figure_id=figure_id,
                     sensitive=bool(item.get("sensitive")),
@@ -287,20 +310,26 @@ async def replace_redaction_from_audit(
             )
     async with UnitOfWork() as uow:
         assert uow.redaction_figures is not None
-        await uow.redaction_figures.replace_for_minute(token, items)
+        await uow.redaction_figures.replace_for_minute(
+            token, items, owner_user_id=owner_id
+        )
         await uow.commit()
 
 
-async def upsert_r2_meta(minute_token: str, meta: dict[str, Any]) -> None:
+async def upsert_r2_meta(
+    minute_token: str, meta: dict[str, Any], *, owner_user_id: int
+) -> None:
     token = (minute_token or "").strip()
     if not token:
         return
+    owner_id = require_owner_user_id(owner_user_id)
     video = meta.get("video") if isinstance(meta.get("video"), dict) else {}
     assets = meta.get("assets") if isinstance(meta.get("assets"), dict) else {}
     async with UnitOfWork() as uow:
         assert uow.r2_sync_states is not None
         await uow.r2_sync_states.upsert(
             R2SyncStateUpsertEntity(
+                owner_user_id=owner_id,
                 minute_token=token,
                 video_key=video.get("key"),
                 video_etag=video.get("etag"),
@@ -320,13 +349,19 @@ def _ms_to_iso(value: int | None) -> str | None:
     return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
 
 
-async def read_meeting_meta(minute_token: str) -> dict[str, Any] | None:
+async def read_meeting_meta(
+    minute_token: str, *, owner_user_id: int
+) -> dict[str, Any] | None:
+    """读取指定 owner 下的会议元数据；必须显式传 owner_user_id。"""
     token = (minute_token or "").strip()
     if not token:
         return None
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.meeting_records is not None
-        record = await uow.meeting_records.get_latest_by_minute_token(token)
+        record = await uow.meeting_records.get_latest_by_minute_token(
+            token, owner_user_id=owner_id
+        )
         if record is None:
             return None
         return {
@@ -346,13 +381,16 @@ async def read_meeting_meta(minute_token: str) -> dict[str, Any] | None:
         }
 
 
-async def read_figures_manifest(minute_token: str) -> dict[str, Any] | None:
+async def read_figures_manifest(
+    minute_token: str, *, owner_user_id: int
+) -> dict[str, Any] | None:
     token = (minute_token or "").strip()
     if not token:
         return None
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.figures is not None
-        items = await uow.figures.list_by_minute_token(token)
+        items = await uow.figures.list_by_minute_token(token, owner_user_id=owner_id)
         if not items:
             return None
         return {
@@ -371,19 +409,29 @@ async def read_figures_manifest(minute_token: str) -> dict[str, Any] | None:
         }
 
 
-async def read_summary_meta(minute_token: str) -> dict[str, Any] | None:
+async def read_summary_meta(
+    minute_token: str, *, owner_user_id: int
+) -> dict[str, Any] | None:
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.summary_runs is not None
-        entity = await uow.summary_runs.get_by_minute_token(minute_token)
+        entity = await uow.summary_runs.get_by_minute_token(
+            minute_token, owner_user_id=owner_id
+        )
         if entity is None:
             return None
         return summary_run_to_meta(entity)
 
 
-async def read_redaction_audit(minute_token: str) -> dict[str, Any] | None:
+async def read_redaction_audit(
+    minute_token: str, *, owner_user_id: int
+) -> dict[str, Any] | None:
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.redaction_figures is not None
-        items = await uow.redaction_figures.list_by_minute_token(minute_token)
+        items = await uow.redaction_figures.list_by_minute_token(
+            minute_token, owner_user_id=owner_id
+        )
         if not items:
             return None
         figures = []
@@ -414,10 +462,15 @@ async def read_redaction_audit(minute_token: str) -> dict[str, Any] | None:
         }
 
 
-async def read_r2_meta(minute_token: str) -> dict[str, Any] | None:
+async def read_r2_meta(
+    minute_token: str, *, owner_user_id: int
+) -> dict[str, Any] | None:
+    owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.r2_sync_states is not None
-        entity = await uow.r2_sync_states.get_by_minute_token(minute_token)
+        entity = await uow.r2_sync_states.get_by_minute_token(
+            minute_token, owner_user_id=owner_id
+        )
         if entity is None:
             return None
         video: dict[str, Any] = {}
@@ -431,18 +484,33 @@ async def read_r2_meta(minute_token: str) -> dict[str, Any] | None:
         return {"assets": entity.assets or {}, "video": video}
 
 
-async def set_summary_status(minute_token: str, status: str) -> None:
+
+async def set_summary_status(
+    minute_token: str,
+    status: str,
+    *,
+    owner_user_id: int,
+) -> None:
+    """按 owner+token 更新会议 summary_status。"""
     token = (minute_token or "").strip()
     if not token:
         return
+    from app.data_model.entity.meeting_record import (
+        MeetingRecordQueryEntity,
+        MeetingRecordUpdateEntity,
+    )
+
     async with UnitOfWork() as uow:
         assert uow.meeting_records is not None
-        record = await uow.meeting_records.get_latest_by_minute_token(token)
-        if record is None or record.id is None:
-            return
-        from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
-
-        await uow.meeting_records.update(
-            MeetingRecordUpdateEntity(id=record.id, summary_status=status)
+        records = await uow.meeting_records.query(
+            MeetingRecordQueryEntity(minute_token=token, owner_user_id=owner_user_id)
         )
+        if not records:
+            return
+        for record in records:
+            if record.id is None:
+                continue
+            await uow.meeting_records.update(
+                MeetingRecordUpdateEntity(id=record.id, summary_status=status)
+            )
         await uow.commit()

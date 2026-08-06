@@ -2,10 +2,10 @@ import logging
 import mimetypes
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 
-from app.core.config import settings
+from app.core.auth_context import get_request_auth, owner_scope_user_id, require_user_id
 from app.dto.feishu.meeting import (
     CloudMeetingItemResponse,
     CloudMeetingListResponse,
@@ -17,12 +17,18 @@ from app.dto.feishu.meeting import (
     DownloadResultItemResponse,
     LocalMediaFileResponse,
     LocalMeetingDetailResponse,
+    LocalTranscriptResponse,
 )
 from app.integrations.feishu.user_auth import UserAuthRequiredError
 from app.service.download_progress_store import download_progress_store
 from app.service.meeting_download_service import MeetingDownloadService
 from app.service.meeting_list_service import MeetingListService
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.ownership import (
+    assert_meeting_progress_visible,
+    assert_meeting_readable,
+    resolve_resource_owner,
+)
 from app.service.r2_media_service import r2_media_service
 
 logger = logging.getLogger(__name__)
@@ -43,8 +49,28 @@ def _parse_optional_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(normalized)
 
 
+@router.get("/stored", response_model=CloudMeetingListResponse)
+async def list_stored_meetings(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> CloudMeetingListResponse:
+    """已入库会议列表：普通用户只看自己的；超管看全站（只读）。"""
+    data = await _list_service.list_stored_meetings(
+        owner_user_id=owner_scope_user_id(request),
+        limit=limit,
+    )
+    return CloudMeetingListResponse(
+        items=[CloudMeetingItemResponse(**item) for item in data["items"]],
+        total=data["total"],
+        filtered_total=data.get("filtered_total"),
+        has_more=data["has_more"],
+        page_token=data["page_token"],
+    )
+
+
 @router.get("/cloud", response_model=CloudMeetingListResponse)
 async def list_cloud_meetings(
+    request: Request,
     query: str | None = None,
     keyword: str | None = None,
     start_time: str | None = Query(default=None, description="ISO 或 datetime-local 格式"),
@@ -56,6 +82,12 @@ async def list_cloud_meetings(
     page_token: str | None = None,
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
 ) -> CloudMeetingListResponse:
+    auth = get_request_auth(request)
+    if auth is not None and auth.is_super_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="超级管理员无个人飞书身份，请使用全站已入库列表 /meetings/stored",
+        )
     try:
         min_duration_ms = (
             int(min_duration_minutes * 60_000) if min_duration_minutes is not None else None
@@ -74,6 +106,7 @@ async def list_cloud_meetings(
             page_size=page_size,
             page_token=page_token,
             sort_order=sort_order,
+            owner_user_id=owner_scope_user_id(request),
         )
     except UserAuthRequiredError as exc:
         raise HTTPException(
@@ -101,12 +134,14 @@ async def _run_downloads(
     skip_if_completed: bool,
     redownload_media: bool = False,
     redownload_transcript: bool = False,
+    owner_user_id: int | None = None,
 ) -> None:
     await _download_service.download_many(
         minute_tokens,
         skip_if_completed=skip_if_completed,
         redownload_media=redownload_media,
         redownload_transcript=redownload_transcript,
+        owner_user_id=owner_user_id,
     )
 
 
@@ -127,8 +162,10 @@ def _result_to_response(result) -> DownloadResultItemResponse:
 async def download_meetings(
     body: DownloadMeetingsRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     sync: bool = Query(default=False, description="为 true 时同步等待下载完成"),
 ) -> DownloadMeetingsResponse:
+    owner_id = require_user_id(request)
     tokens = list(dict.fromkeys(t for t in body.minute_tokens if t.strip()))
     if not tokens:
         raise HTTPException(status_code=400, detail="minute_tokens 不能为空")
@@ -139,6 +176,7 @@ async def download_meetings(
             skip_if_completed=body.skip_if_completed,
             redownload_media=body.redownload_media,
             redownload_transcript=body.redownload_transcript,
+            owner_user_id=owner_id,
         )
     else:
         background_tasks.add_task(
@@ -147,6 +185,7 @@ async def download_meetings(
             body.skip_if_completed,
             body.redownload_media,
             body.redownload_transcript,
+            owner_id,
         )
         results = [
             DownloadResultItemResponse(minute_token=t, status="DOWNLOADING")
@@ -158,8 +197,15 @@ async def download_meetings(
 
 
 @router.get("/download/progress/{minute_token}", response_model=DownloadProgressResponse)
-async def get_download_progress(minute_token: str) -> DownloadProgressResponse:
-    progress = download_progress_store.get(minute_token)
+async def get_download_progress(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> DownloadProgressResponse:
+    owner = await assert_meeting_progress_visible(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    progress = download_progress_store.get(minute_token, owner_user_id=owner)
     if progress is None:
         raise HTTPException(status_code=404, detail="暂无该会议的下载进度")
     return DownloadProgressResponse(
@@ -174,15 +220,26 @@ async def get_download_progress(minute_token: str) -> DownloadProgressResponse:
 @router.post("/download/progress/batch", response_model=DownloadProgressBatchResponse)
 async def get_download_progress_batch(
     body: DownloadProgressBatchRequest,
+    request: Request,
 ) -> DownloadProgressBatchResponse:
     items: list[DownloadProgressResponse] = []
-    for token in body.minute_tokens:
-        progress = download_progress_store.get(token)
+    for item in body.items:
+        token = (item.minute_token or "").strip()
+        if not token:
+            continue
+        try:
+            owner = await resolve_resource_owner(
+                request, token, owner_user_id=item.owner_user_id
+            )
+        except HTTPException:
+            continue
+        progress = download_progress_store.get(token, owner_user_id=owner)
         if progress is None:
             continue
         items.append(
             DownloadProgressResponse(
                 minute_token=progress.minute_token,
+                owner_user_id=progress.owner_user_id,
                 percent=progress.percent,
                 stage=progress.stage,
                 status=progress.status,
@@ -193,17 +250,32 @@ async def get_download_progress_batch(
 
 
 @router.get("/local/{minute_token}", response_model=LocalMeetingDetailResponse)
-async def get_local_meeting(minute_token: str) -> LocalMeetingDetailResponse:
-    detail = _list_service.get_local_meeting(minute_token)
+async def get_local_meeting(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> LocalMeetingDetailResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    detail = await _list_service.get_local_meeting_async(
+        minute_token, owner_user_id=owner
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="本地未找到该会议资源")
 
     media_files = list(detail.get("media_files") or [])
-    signed_video = await r2_media_service.presign_share_video(minute_token)
+    signed_video = await r2_media_service.presign_share_video(
+        minute_token, owner_user_id=owner
+    )
     has_video = bool(detail.get("has_video"))
     if signed_video:
         has_video = True
-        video_meta = (r2_media_service.read_meta(minute_token).get("video") or {})
+        video_meta = (
+            await r2_media_service.read_meta_async(
+                minute_token, owner_user_id=owner
+            )
+        ).get("video") or {}
         source_name = str(video_meta.get("source_name") or "video.mp4")
         replaced = False
         for mf in media_files:
@@ -221,28 +293,62 @@ async def get_local_meeting(minute_token: str) -> LocalMeetingDetailResponse:
         duration_ms=detail.get("duration_ms"),
         has_video=has_video,
         media_files=[LocalMediaFileResponse(**mf) for mf in media_files],
-        transcript=detail.get("transcript"),
+        has_transcript=bool(detail.get("has_transcript")),
         downloaded_at=detail.get("downloaded_at"),
     )
 
 
+@router.get(
+    "/local/{minute_token}/transcript",
+    response_model=LocalTranscriptResponse,
+)
+async def get_local_transcript(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> LocalTranscriptResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    text = await _storage.read_transcript_async(
+        minute_token, owner_user_id=owner
+    )
+    if text is None:
+        raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
+    return LocalTranscriptResponse(minute_token=minute_token, transcript=text)
+
+
 @router.get("/local/{minute_token}/media/{filename}")
-async def get_local_media(minute_token: str, filename: str):
+async def get_local_media(
+    minute_token: str,
+    filename: str,
+    request: Request,
+    owner_user_id: int | None = None,
+):
     """本地媒体；视频若已上云则 302 到 R2。"""
-    path = _storage.resolve_media_path(minute_token, filename)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    path = _storage.resolve_media_path(
+        minute_token, filename, owner_user_id=owner
+    )
     if path is None:
-        signed = await r2_media_service.presign_share_video(minute_token)
+        signed = await r2_media_service.presign_share_video(
+            minute_token, owner_user_id=owner
+        )
         if signed:
             return RedirectResponse(url=signed, status_code=302)
         raise HTTPException(status_code=404, detail="媒体文件不存在")
     # 视频已在云上时优先云播放，并顺带清理残留本地原片
     suffix = path.suffix.lower()
-    if suffix in {".mp4", ".mov", ".webm", ".mkv"} and r2_media_service.video_ready(
-        minute_token
+    if suffix in {".mp4", ".mov", ".webm", ".mkv"} and await r2_media_service.video_ready_async(
+        minute_token, owner_user_id=owner
     ):
-        signed = await r2_media_service.presign_share_video(minute_token)
+        signed = await r2_media_service.presign_share_video(
+            minute_token, owner_user_id=owner
+        )
         if signed:
-            r2_media_service.purge_local_videos(minute_token)
+            r2_media_service.purge_local_videos(minute_token, owner_user_id=owner)
             return RedirectResponse(url=signed, status_code=302)
     media_type, _ = mimetypes.guess_type(path.name)
     return FileResponse(path, media_type=media_type or "application/octet-stream", filename=path.name)

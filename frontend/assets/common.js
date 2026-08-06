@@ -1,5 +1,9 @@
 const API = window.APP_CONFIG?.apiBase ?? "http://127.0.0.1:7354/api/v1";
-const ADMIN_TOKEN_KEY = "minutes_admin_token";
+const USER_JWT_KEY = "minutes_user_jwt";
+const SUPER_JWT_KEY = "minutes_super_jwt";
+const VIEW_MODE_KEY = "minutes_admin_view_mode";
+/** 兼容旧 key，读一次后迁移 */
+const LEGACY_ADMIN_TOKEN_KEY = "minutes_admin_token";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -71,21 +75,78 @@ function setThinkingStatus(el) {
   el.innerHTML = thinkingHtml({ block: false });
 }
 
+function getUserJwt() {
+  const legacy = localStorage.getItem(LEGACY_ADMIN_TOKEN_KEY);
+  if (legacy && !localStorage.getItem(USER_JWT_KEY)) {
+    // 旧全局口令不能当 JWT 用，清掉以免误以为已登录
+    localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
+  }
+  return localStorage.getItem(USER_JWT_KEY) || "";
+}
+
+function setUserJwt(token) {
+  localStorage.setItem(USER_JWT_KEY, token);
+  localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
+}
+
+function clearUserJwt() {
+  localStorage.removeItem(USER_JWT_KEY);
+  localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
+}
+
+function getSuperJwt() {
+  return localStorage.getItem(SUPER_JWT_KEY) || "";
+}
+
+function setSuperJwt(token) {
+  localStorage.setItem(SUPER_JWT_KEY, token);
+}
+
+function clearSuperJwt() {
+  localStorage.removeItem(SUPER_JWT_KEY);
+}
+
+function getAdminViewMode() {
+  const mode = localStorage.getItem(VIEW_MODE_KEY);
+  if (mode === "super" && getSuperJwt()) return "super";
+  return "user";
+}
+
+function setAdminViewMode(mode) {
+  if (mode === "super" && getSuperJwt()) {
+    localStorage.setItem(VIEW_MODE_KEY, "super");
+    return;
+  }
+  localStorage.setItem(VIEW_MODE_KEY, "user");
+}
+
+function isSuperAdminView() {
+  return getAdminViewMode() === "super";
+}
+
+/** 当前请求使用的 Bearer：超管模式用超管 JWT，否则用户 JWT */
+function getActiveBearer() {
+  if (isSuperAdminView() && getSuperJwt()) return getSuperJwt();
+  return getUserJwt();
+}
+
 function getAdminToken() {
-  return localStorage.getItem(ADMIN_TOKEN_KEY) || "";
+  return getActiveBearer();
 }
 
 function setAdminToken(token) {
-  localStorage.setItem(ADMIN_TOKEN_KEY, token);
+  setUserJwt(token);
 }
 
 function clearAdminToken() {
-  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  clearUserJwt();
+  clearSuperJwt();
+  localStorage.removeItem(VIEW_MODE_KEY);
   clearAccessTicket();
 }
 
 function requireAdminPage() {
-  if (getAdminToken()) return true;
+  if (getUserJwt()) return true;
   const next = `${location.pathname}${location.search}`;
   location.replace(`/login.html?next=${encodeURIComponent(next)}`);
   return false;
@@ -96,7 +157,7 @@ function logoutAdmin() {
   location.replace("/login.html");
 }
 
-/** EventSource / <video src> 无法带 Authorization，用短期票挂到 query（不是 ADMIN_TOKEN） */
+/** EventSource / <video src> 无法带 Authorization，用短期票挂到 query */
 const accessTicketState = {
   ticket: "",
   expiresAt: 0,
@@ -121,7 +182,7 @@ async function ensureAccessTicket() {
     throw new Error("媒体访问票响应缺少 access_ticket，怀疑后端版本不匹配");
   }
   accessTicketState.ticket = data.access_ticket;
-  accessTicketState.expiresAt = Date.now() + (Number(data.expires_in_seconds) || 7200) * 1000;
+  accessTicketState.expiresAt = Date.now() + (Number(data.expires_in_seconds) || 1800) * 1000;
   return accessTicketState.ticket;
 }
 
@@ -140,16 +201,15 @@ function withShareSessionQuery(url, sessionId) {
 
 async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  const token = getAdminToken();
+  const token = getActiveBearer();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const url = path.startsWith("http") ? path : `${API}${path.startsWith("/") ? "" : "/"}${path}`;
   const res = await fetch(url, { ...options, headers });
-  if (res.status === 401 && !url.includes("/auth/admin/login")) {
+  if (res.status === 401 && !url.includes("/auth/login") && !url.includes("/auth/admin/login")) {
     const peek = await res.clone().json().catch(() => ({}));
-    // 飞书 OAuth 缺失也会 401，但 detail 是带 login_url 的对象，不能清管理员登录态
     if (peek.detail === "需要管理员登录") {
       clearAdminToken();
       const next = `${location.pathname}${location.search}`;
@@ -181,6 +241,28 @@ async function downloadWithAuth(path, filenameHint) {
  * 更新页头飞书授权状态。列表页可传 onMissingScopes 处理权限横幅。
  */
 async function checkAuth({ onMissingScopes } = {}) {
+  const banner = $("#auth-banner");
+  const loginLink = $("#login-link");
+  const reauthBtn = $("#reauth-btn");
+  const authStatus = $("#auth-status");
+
+  // 超管无个人飞书身份：跳过 /auth/feishu/status，避免无谓 403/鉴权开销
+  if (isSuperAdminView()) {
+    banner?.classList.add("hidden");
+    if (authStatus) {
+      authStatus.textContent = "超级管理端 · 全站";
+      authStatus.className = "auth-status is-warn";
+    }
+    if (reauthBtn) {
+      reauthBtn.href = "#";
+      reauthBtn.onclick = (e) => {
+        e.preventDefault();
+        alert("超级管理员模式无法进行飞书个人授权，请先切换回管理端");
+      };
+    }
+    return;
+  }
+
   try {
     const res = await apiFetch("/auth/feishu/status");
     if (!res.ok) return;
@@ -188,12 +270,20 @@ async function checkAuth({ onMissingScopes } = {}) {
     authState.loginUrl = data.login_url || "";
     authState.reauthUrl = data.reauth_url || data.login_url || "";
 
-    const banner = $("#auth-banner");
-    const loginLink = $("#login-link");
-    const reauthBtn = $("#reauth-btn");
-    const authStatus = $("#auth-status");
-
-    if (reauthBtn) reauthBtn.href = authState.reauthUrl || "#";
+    if (reauthBtn) {
+      reauthBtn.href = "#";
+      reauthBtn.onclick = async (e) => {
+        e.preventDefault();
+        try {
+          const ticket = await ensureAccessTicket();
+          const base = authState.reauthUrl || "/api/v1/auth/feishu/login";
+          const sep = base.includes("?") ? "&" : "?";
+          location.href = `${base}${sep}access_ticket=${encodeURIComponent(ticket)}`;
+        } catch (err) {
+          alert(err.message || "无法开始飞书授权");
+        }
+      };
+    }
 
     if (!data.authorized) {
       banner?.classList.remove("hidden");

@@ -12,6 +12,7 @@ from app.repository.orm.redaction_figure import RedactionFigureORM
 def _to_entity(orm: RedactionFigureORM) -> RedactionFigureEntity:
     return RedactionFigureEntity(
         id=orm.id,
+        owner_user_id=orm.owner_user_id,
         minute_token=orm.minute_token,
         figure_id=orm.figure_id,
         sensitive=bool(orm.sensitive),
@@ -28,26 +29,37 @@ class RedactionFigureRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_by_minute_token(self, minute_token: str) -> list[RedactionFigureEntity]:
+    async def list_by_minute_token(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> list[RedactionFigureEntity]:
         stmt = (
             select(RedactionFigureORM)
-            .where(RedactionFigureORM.minute_token == minute_token)
+            .where(
+                RedactionFigureORM.owner_user_id == owner_user_id,
+                RedactionFigureORM.minute_token == minute_token,
+            )
             .order_by(RedactionFigureORM.figure_id.asc())
         )
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]
 
     async def replace_for_minute(
-        self, minute_token: str, items: list[RedactionFigureUpsertEntity]
+        self,
+        minute_token: str,
+        items: list[RedactionFigureUpsertEntity],
+        *,
+        owner_user_id: int,
     ) -> list[RedactionFigureEntity]:
         await self._session.execute(
             delete(RedactionFigureORM).where(
-                RedactionFigureORM.minute_token == minute_token
+                RedactionFigureORM.owner_user_id == owner_user_id,
+                RedactionFigureORM.minute_token == minute_token,
             )
         )
         out: list[RedactionFigureEntity] = []
         for item in items:
             orm = RedactionFigureORM(
+                owner_user_id=owner_user_id,
                 minute_token=minute_token,
                 figure_id=item.figure_id,
                 sensitive=item.sensitive,
@@ -66,6 +78,7 @@ class RedactionFigureRepository:
 
     async def upsert(self, entity: RedactionFigureUpsertEntity) -> RedactionFigureEntity:
         stmt = select(RedactionFigureORM).where(
+            RedactionFigureORM.owner_user_id == entity.owner_user_id,
             RedactionFigureORM.minute_token == entity.minute_token,
             RedactionFigureORM.figure_id == entity.figure_id,
         )
@@ -73,6 +86,7 @@ class RedactionFigureRepository:
         orm = result.scalar_one_or_none()
         if orm is None:
             orm = RedactionFigureORM(
+                owner_user_id=entity.owner_user_id,
                 minute_token=entity.minute_token,
                 figure_id=entity.figure_id,
             )

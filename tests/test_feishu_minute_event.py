@@ -47,16 +47,39 @@ def _payload(
     }
 
 
-def test_minute_generated_triggers_download_with_token() -> None:
+def _patch_feishu_token_users(
+    monkeypatch: pytest.MonkeyPatch, user_ids: list[int]
+) -> None:
+    class StubTokens:
+        async def list_user_ids_with_tokens(self) -> list[int]:
+            return list(user_ids)
+
+    class StubUow:
+        def __init__(self) -> None:
+            self.feishu_user_tokens = StubTokens()
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr("app.service.feishu_event_service.UnitOfWork", lambda: StubUow())
+
+
+def test_minute_generated_triggers_download_with_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake = FakeDownload()
     service = FeishuEventService(download=fake)  # pyright: ignore[reportArgumentType]
+    _patch_feishu_token_users(monkeypatch, [42])
 
     result = asyncio.run(service.handle_event(_payload()))
 
     assert result == {
         "handled": True,
         "event_type": EVENT_MINUTE_GENERATED,
-        "record_id": 7,
+        "record_ids": [7],
     }
     assert len(fake.calls) == 1
     call = fake.calls[0]
@@ -66,6 +89,7 @@ def test_minute_generated_triggers_download_with_token() -> None:
     assert call["unique_key"] == "6911188411934433028"
     assert call["skip_if_completed"] is True
     assert call["ready_retries"] >= 1
+    assert call["owner_user_id"] == 42
 
 
 def test_minute_generated_without_token_is_ignored() -> None:
@@ -84,7 +108,7 @@ def test_minute_generated_without_token_is_ignored() -> None:
     assert result == {
         "handled": True,
         "event_type": EVENT_MINUTE_GENERATED,
-        "record_id": None,
+        "record_ids": [],
     }
     assert fake.calls == []
 
@@ -120,7 +144,9 @@ def _patch_download_uow(
         async def get_by_event_id(self, _event_id: str) -> None:
             return None
 
-        async def get_latest_by_minute_token(self, _token: str) -> None:
+        async def get_latest_by_minute_token(
+            self, _token: str, *, owner_user_id: int
+        ) -> None:
             return None
 
         async def create(self, _entity: Any) -> StubEntity:
@@ -176,6 +202,7 @@ def test_download_retries_when_minute_not_ready(monkeypatch: Any) -> None:
             feishu_event_id="evt-retry",
             ready_retries=4,
             ready_retry_seconds=1.5,
+            owner_user_id=1,
         )
     )
 
@@ -208,6 +235,7 @@ def test_download_does_not_retry_permission_errors(monkeypatch: Any) -> None:
             feishu_event_id="evt-denied",
             ready_retries=5,
             ready_retry_seconds=1.0,
+            owner_user_id=1,
         )
     )
 

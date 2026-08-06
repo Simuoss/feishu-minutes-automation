@@ -23,6 +23,7 @@ class UserCreateEntity:
 @dataclass
 class UserUpdateEntity:
     id: int
+    username: str | None = None
     password_hash: str | None = None
     status: str | None = None
     updated_at: int | None = None

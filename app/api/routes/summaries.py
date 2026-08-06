@@ -4,9 +4,10 @@ import mimetypes
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
+from app.core.auth_context import require_user_id
 from app.dto.summary import (
     GenerateSummaryRequest,
     GenerateSummaryResponse,
@@ -25,7 +26,13 @@ from app.dto.summary import (
     SummaryProgressResponse,
 )
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.ownership import (
+    assert_meeting_progress_visible,
+    assert_meeting_readable,
+    resolve_resource_owner,
+)
 from app.service.r2_media_service import r2_media_service
+from app.service.redaction_access import assert_asset_safe_to_serve
 from app.service.redaction_review_service import redaction_review_service
 from app.service.summary_event_broker import SummaryStatus, summary_broker
 from app.service.summary_generation_service import summary_generation_service
@@ -39,8 +46,12 @@ _storage = MeetingStorageService()
 _review = redaction_review_service
 
 
-async def _run_generation(minute_token: str, force: bool, mode: str) -> None:
-    await _summary_service.generate(minute_token, force=force, mode=mode)
+async def _run_generation(
+    minute_token: str, force: bool, mode: str, owner_user_id: int
+) -> None:
+    await _summary_service.generate(
+        minute_token, owner_user_id=owner_user_id, force=force, mode=mode
+    )
 
 
 def _meta_to_dto(meta: dict[str, Any]) -> SummaryMetaData:
@@ -49,19 +60,22 @@ def _meta_to_dto(meta: dict[str, Any]) -> SummaryMetaData:
     )
 
 
-async def _build_metrics(minute_token: str) -> SummaryMetricsResponse:
+async def _build_metrics(
+    minute_token: str, *, owner_user_id: int
+) -> SummaryMetricsResponse:
     from app.service.metadata_db_service import read_r2_meta, read_summary_meta
 
-    detail = _storage.read_summary(minute_token)
     try:
-        meta = await read_summary_meta(minute_token) or {}
+        meta = await read_summary_meta(
+            minute_token, owner_user_id=owner_user_id
+        ) or {}
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "从 DB 读纪要指标失败 token=%s；怀疑 schema 未就绪。err=%s",
             minute_token,
             exc,
         )
-        meta = (detail or {}).get("meta") or {}
+        meta = {}
 
     suspicious = meta.get("anchor_suspicious")
     if isinstance(suspicious, list):
@@ -79,13 +93,17 @@ async def _build_metrics(minute_token: str) -> SummaryMetricsResponse:
 
     r2_count = None
     try:
-        r2_meta = await read_r2_meta(minute_token) or {"assets": {}}
+        r2_meta = await read_r2_meta(
+            minute_token, owner_user_id=owner_user_id
+        ) or {"assets": {}}
         assets = r2_meta.get("assets") or {}
         r2_count = len(assets) if isinstance(assets, dict) else None
     except Exception:  # noqa: BLE001
         r2_count = None
 
-    has_summary = detail is not None or bool(meta.get("generated_at") or meta.get("summary_chars"))
+    has_summary = _storage.has_summary(
+        minute_token, owner_user_id=owner_user_id
+    ) or bool(meta.get("generated_at") or meta.get("summary_chars"))
     return SummaryMetricsResponse(
         minute_token=minute_token,
         has_summary=has_summary,
@@ -120,27 +138,24 @@ def _audit_to_response(minute_token: str, audit: dict[str, Any]) -> RedactionAud
         if not isinstance(item, dict):
             continue
         figure_id = str(item.get("figure_id") or "")
-        original_rel = item.get("original_relative")
+        status = str(item.get("status") or "CLEAN").upper()
         asset_rel = item.get("asset_relative")
-        original_url = None
         asset_url = None
-        if original_rel and _storage.resolve_agent_relative_path(minute_token, str(original_rel)):
-            original_url = f"/api/v1/meetings/{minute_token}/redaction/originals/{figure_id}.jpg"
-        if asset_rel:
+        # 永不下发原图；仅 CLEAN / 已打码 可给成文配图 URL
+        if asset_rel and status in {"CLEAN", "REDACTED", "MANUAL_APPROVED"}:
             name = str(asset_rel).rsplit("/", 1)[-1]
-            # 路由层会优先 302 到 R2，不依赖本地文件仍在
             asset_url = f"/api/v1/meetings/{minute_token}/summary/assets/{name}"
         figures.append(
             RedactionFigureData(
                 figure_id=figure_id,
                 sensitive=bool(item.get("sensitive")),
-                status=str(item.get("status") or "CLEAN"),
+                status=status,
                 regions=item.get("regions") or [],
                 attempts=item.get("attempts") or [],
                 abandon_reason=item.get("abandon_reason"),
-                original_relative=original_rel,
-                asset_relative=asset_rel,
-                original_url=original_url,
+                original_relative=None,
+                asset_relative=asset_rel if asset_url else None,
+                original_url=None,
                 asset_url=asset_url,
             )
         )
@@ -160,14 +175,22 @@ async def generate_summary(
     minute_token: str,
     body: GenerateSummaryRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     sync: bool = Query(default=False, description="为 true 时同步等待生成完成，耗时可达数分钟"),
+    owner_user_id: int | None = None,
 ) -> GenerateSummaryResponse:
-    if body.mode != "R2_SYNC" and _storage.read_transcript(minute_token) is None:
+    require_user_id(request)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    if body.mode != "R2_SYNC" and await _storage.read_transcript_async(
+        minute_token, owner_user_id=owner
+    ) is None:
         raise HTTPException(status_code=404, detail="本地没有该会议的转写文本，请先下载")
 
     if sync:
         result = await _summary_service.generate(
-            minute_token, force=body.force, mode=body.mode
+            minute_token, owner_user_id=owner, force=body.force, mode=body.mode
         )
         return GenerateSummaryResponse(
             minute_token=result.minute_token,
@@ -184,7 +207,9 @@ async def generate_summary(
             mode=result.mode,
         )
 
-    background_tasks.add_task(_run_generation, minute_token, body.force, body.mode)
+    background_tasks.add_task(
+        _run_generation, minute_token, body.force, body.mode, owner
+    )
     return GenerateSummaryResponse(
         minute_token=minute_token,
         status=SummaryStatus.QUEUED.value,
@@ -193,8 +218,15 @@ async def generate_summary(
 
 
 @router.get("/{minute_token}/summary/progress", response_model=SummaryProgressResponse)
-async def get_summary_progress(minute_token: str) -> SummaryProgressResponse:
-    channel = summary_broker.get(minute_token)
+async def get_summary_progress(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> SummaryProgressResponse:
+    owner = await assert_meeting_progress_visible(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    channel = summary_broker.get(minute_token, owner_user_id=owner)
     if channel is None:
         raise HTTPException(status_code=404, detail="暂无该会议的纪要生成进度")
     return SummaryProgressResponse(**channel.snapshot())
@@ -203,10 +235,20 @@ async def get_summary_progress(minute_token: str) -> SummaryProgressResponse:
 @router.post("/summary/progress/batch", response_model=SummaryProgressBatchResponse)
 async def get_summary_progress_batch(
     body: SummaryProgressBatchRequest,
+    request: Request,
 ) -> SummaryProgressBatchResponse:
     items: list[SummaryProgressResponse] = []
-    for token in body.minute_tokens:
-        channel = summary_broker.get(token)
+    for item in body.items:
+        token = (item.minute_token or "").strip()
+        if not token:
+            continue
+        try:
+            owner = await resolve_resource_owner(
+                request, token, owner_user_id=item.owner_user_id
+            )
+        except HTTPException:
+            continue
+        channel = summary_broker.get(token, owner_user_id=owner)
         if channel is None:
             continue
         items.append(SummaryProgressResponse(**channel.snapshot()))
@@ -214,24 +256,50 @@ async def get_summary_progress_batch(
 
 
 @router.get("/{minute_token}/summary/metrics", response_model=SummaryMetricsResponse)
-async def get_summary_metrics(minute_token: str) -> SummaryMetricsResponse:
-    return await _build_metrics(minute_token)
+async def get_summary_metrics(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> SummaryMetricsResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    return await _build_metrics(minute_token, owner_user_id=owner)
 
 
 @router.post("/summary/metrics/batch", response_model=SummaryMetricsBatchResponse)
 async def get_summary_metrics_batch(
     body: SummaryMetricsBatchRequest,
+    request: Request,
+    owner_user_id: int | None = None,
 ) -> SummaryMetricsBatchResponse:
-    items = [await _build_metrics(token) for token in body.minute_tokens]
+    items: list[SummaryMetricsResponse] = []
+    for token in body.minute_tokens:
+        try:
+            owner = await assert_meeting_readable(
+                request, token, owner_user_id=owner_user_id
+            )
+        except HTTPException:
+            continue
+        items.append(await _build_metrics(token, owner_user_id=owner))
     return SummaryMetricsBatchResponse(items=items)
 
 
 @router.get("/{minute_token}/summary/stream")
-async def stream_summary(minute_token: str) -> StreamingResponse:
+async def stream_summary(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> StreamingResponse:
     """以 SSE 推送生成状态与正文增量；新连接首帧为当前快照，可中途接入。"""
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
 
     async def event_source() -> AsyncIterator[str]:
-        async for item in summary_broker.subscribe(minute_token):
+        async for item in summary_broker.subscribe(
+            minute_token, owner_user_id=owner
+        ):
             payload = json.dumps(item["data"], ensure_ascii=False)
             yield f"event: {item['event']}\ndata: {payload}\n\n"
 
@@ -247,12 +315,27 @@ async def stream_summary(minute_token: str) -> StreamingResponse:
 
 
 @router.get("/{minute_token}/summary/assets/{filename}")
-async def get_summary_asset(minute_token: str, filename: str):
+async def get_summary_asset(
+    minute_token: str,
+    filename: str,
+    request: Request,
+    owner_user_id: int | None = None,
+):
     """提供纪要正文里引用的截图；优先 R2 预签名。"""
-    signed = await r2_media_service.presign_asset(minute_token, filename)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    await assert_asset_safe_to_serve(
+        minute_token, filename, owner_user_id=owner
+    )
+    signed = await r2_media_service.presign_asset(
+        minute_token, filename, owner_user_id=owner
+    )
     if signed:
         return RedirectResponse(url=signed, status_code=302)
-    asset_path = _storage.resolve_asset_path(minute_token, filename)
+    asset_path = _storage.resolve_asset_path(
+        minute_token, filename, owner_user_id=owner
+    )
     if asset_path is None:
         raise HTTPException(status_code=404, detail="配图不存在")
     media_type = mimetypes.guess_type(asset_path.name)[0] or "image/jpeg"
@@ -260,8 +343,17 @@ async def get_summary_asset(minute_token: str, filename: str):
 
 
 @router.get("/{minute_token}/summary", response_model=SummaryDetailResponse)
-async def get_summary(minute_token: str) -> SummaryDetailResponse:
-    detail = _storage.read_summary(minute_token)
+async def get_summary(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> SummaryDetailResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    detail = await _storage.read_summary_async(
+        minute_token, owner_user_id=owner
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="该会议尚未生成纪要")
     meta = detail.get("meta") or {}
@@ -273,22 +365,26 @@ async def get_summary(minute_token: str) -> SummaryDetailResponse:
 
 
 @router.get("/{minute_token}/redaction/audit", response_model=RedactionAuditResponse)
-async def get_redaction_audit(minute_token: str) -> RedactionAuditResponse:
-    audit = _review.read_audit(minute_token)
+async def get_redaction_audit(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> RedactionAuditResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    audit = _review.read_audit(minute_token, owner_user_id=owner)
     if audit is None:
         raise HTTPException(status_code=404, detail="尚无脱敏审计记录，请先生成带图纪要")
     return _audit_to_response(minute_token, audit)
 
 
 @router.get("/{minute_token}/redaction/originals/{filename}")
-async def get_redaction_original(minute_token: str, filename: str) -> FileResponse:
-    path = _storage.resolve_agent_relative_path(
-        minute_token, f"agent/redaction/originals/{filename}"
-    )
-    if path is None:
-        raise HTTPException(status_code=404, detail="脱敏原图不存在")
-    media_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    return FileResponse(path, media_type=media_type)
+async def get_redaction_original(
+    minute_token: str, filename: str, request: Request
+) -> FileResponse:
+    # 原图永不对前端开放，否则脱敏失去意义
+    raise HTTPException(status_code=403, detail="脱敏原图不可访问")
 
 
 @router.post(
@@ -298,18 +394,25 @@ async def get_redaction_original(minute_token: str, filename: str) -> FileRespon
 async def approve_redaction(
     minute_token: str,
     body: RedactionApproveRequest,
+    request: Request,
+    owner_user_id: int | None = None,
 ) -> RedactionActionResponse:
+    require_user_id(request)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
     try:
         audit = _review.approve(
             minute_token,
             body.figure_id,
             [r.model_dump() for r in body.regions],
+            owner_user_id=owner,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await r2_media_service.sync_assets_safe(minute_token)
+    await r2_media_service.sync_assets_safe(minute_token, owner_user_id=owner)
     return RedactionActionResponse(
         minute_token=minute_token,
         figure_id=body.figure_id,
@@ -326,8 +429,16 @@ async def approve_redaction(
 async def abandon_redaction(
     minute_token: str,
     body: RedactionAbandonRequest,
+    request: Request,
+    owner_user_id: int | None = None,
 ) -> RedactionActionResponse:
-    audit = _review.abandon(minute_token, body.figure_id, body.reason)
+    require_user_id(request)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    audit = _review.abandon(
+        minute_token, body.figure_id, body.reason, owner_user_id=owner
+    )
     return RedactionActionResponse(
         minute_token=minute_token,
         figure_id=body.figure_id,

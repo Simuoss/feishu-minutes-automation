@@ -11,6 +11,7 @@ from app.service.summary_event_broker import SummaryStatus, summary_broker
 from app.service.summary_generation_service import SummaryGenerationService
 
 TOKEN = "obtest0001"
+OWNER = 1
 
 TRANSCRIPT = """2026-07-21 20:58:04 CST|1小时 3秒
 
@@ -79,23 +80,25 @@ class FakeLlm:
 def _make_storage(tmp_path: Path, *, with_transcript: bool = True) -> MeetingStorageService:
     storage = MeetingStorageService(storage_root=str(tmp_path))
     if with_transcript:
-        storage.ensure_layout(TOKEN)
-        storage.save_transcript(TOKEN, TRANSCRIPT.encode("utf-8"))
+        storage.ensure_layout(TOKEN, owner_user_id=OWNER)
+        storage.save_transcript(
+            TOKEN, TRANSCRIPT.encode("utf-8"), owner_user_id=OWNER
+        )
     return storage
 
 
 def test_generate_writes_summary_and_snaps_anchor(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     service = SummaryGenerationService(storage=storage, llm=FakeLlm(MODEL_OUTPUT))
 
-    result = asyncio.run(service.generate(TOKEN))
+    result = asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.COMPLETED.value
     assert result.anchor_total == 2
     assert result.anchor_aligned == 1
 
-    saved = storage.read_summary(TOKEN)
+    saved = storage.read_summary(TOKEN, owner_user_id=OWNER)
     assert saved is not None
     # 取整的 00:35:00 应被吸附到真实存在的 00:34:52
     assert "`00:34:52`" in saved["content"]
@@ -108,26 +111,26 @@ def test_generate_writes_summary_and_snaps_anchor(tmp_path: Path):
 
 
 def test_generate_skips_when_summary_exists(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     llm = FakeLlm(MODEL_OUTPUT)
     service = SummaryGenerationService(storage=storage, llm=llm)
 
-    asyncio.run(service.generate(TOKEN))
-    asyncio.run(service.generate(TOKEN))
+    asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
+    asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
     assert llm.calls == 1
 
-    asyncio.run(service.generate(TOKEN, force=True))
+    asyncio.run(service.generate(TOKEN, owner_user_id=OWNER, force=True))
     assert llm.calls == 2
 
 
 def test_generate_fails_fast_without_transcript(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path, with_transcript=False)
     llm = FakeLlm(MODEL_OUTPUT)
     service = SummaryGenerationService(storage=storage, llm=llm)
 
-    result = asyncio.run(service.generate(TOKEN))
+    result = asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.FAILED.value
     assert result.error_message is not None
@@ -137,24 +140,24 @@ def test_generate_fails_fast_without_transcript(tmp_path: Path):
 
 
 def test_model_failure_is_reported_as_failed(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     service = SummaryGenerationService(
         storage=storage,
         llm=FakeLlm(error=LlmRequestError("模型服务连续 5 次不可用", status_code=500, attempts=5)),
     )
 
-    result = asyncio.run(service.generate(TOKEN))
+    result = asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
 
     assert result.status == SummaryStatus.FAILED.value
-    channel = summary_broker.get(TOKEN)
+    channel = summary_broker.get(TOKEN, owner_user_id=OWNER)
     assert channel is not None
     assert channel.status == SummaryStatus.FAILED.value
-    assert storage.read_summary(TOKEN) is None
+    assert storage.read_summary(TOKEN, owner_user_id=OWNER) is None
 
 
 def test_streaming_deltas_are_broadcast_to_subscriber(tmp_path: Path):
-    summary_broker.clear(TOKEN)
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
     storage = _make_storage(tmp_path)
     service = SummaryGenerationService(storage=storage, llm=FakeLlm(MODEL_OUTPUT))
 
@@ -162,14 +165,14 @@ def test_streaming_deltas_are_broadcast_to_subscriber(tmp_path: Path):
         received: list[dict[str, Any]] = []
 
         async def listen():
-            async for item in summary_broker.subscribe(TOKEN):
+            async for item in summary_broker.subscribe(TOKEN, owner_user_id=OWNER):
                 received.append(item)
                 if item["event"] in {"done", "failed"}:
                     return
 
         listener = asyncio.create_task(listen())
         await asyncio.sleep(0)  # 让订阅先建立，避免漏掉首批事件
-        await service.generate(TOKEN)
+        await service.generate(TOKEN, owner_user_id=OWNER)
         await asyncio.wait_for(listener, timeout=5)
         return received
 

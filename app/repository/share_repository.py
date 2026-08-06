@@ -49,7 +49,13 @@ class ShareRepository:
         orm = result.scalar_one_or_none()
         return _to_entity(orm) if orm else None
 
-    async def list_by_minute(self, minute_token: str, include_revoked: bool = False) -> list[ShareEntity]:
+    async def list_by_minute(
+        self,
+        minute_token: str,
+        include_revoked: bool = False,
+        *,
+        owner_user_id: int | None = None,
+    ) -> list[ShareEntity]:
         stmt = (
             select(ShareORM)
             .where(ShareORM.minute_token == minute_token)
@@ -57,6 +63,8 @@ class ShareRepository:
         )
         if not include_revoked:
             stmt = stmt.where(ShareORM.revoked_at.is_(None))
+        if owner_user_id is not None:
+            stmt = stmt.where(ShareORM.owner_user_id == owner_user_id)
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]
 
@@ -109,6 +117,8 @@ class ShareRepository:
             stmt = stmt.where(ShareORM.created_at >= q.created_from)
         if q.created_to is not None:
             stmt = stmt.where(ShareORM.created_at <= q.created_to)
+        if q.owner_user_id is not None:
+            stmt = stmt.where(ShareORM.owner_user_id == q.owner_user_id)
 
         # 管理端综合筛选含会议名（本地 meta），统一拉候选后由 Service 排序分页
         stmt = stmt.order_by(ShareORM.created_at.desc(), ShareORM.id.desc()).limit(2000)

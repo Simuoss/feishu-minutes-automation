@@ -66,6 +66,17 @@ class ShareSessionStore:
             self._sessions.pop(sid, None)
         return len(dead)
 
+    def invalidate_access_key(self, access_key_id: int) -> int:
+        """吊销密钥后清掉所有依赖该密钥的访客会话。"""
+        dead = [
+            sid
+            for sid, s in self._sessions.items()
+            if s.access_key_id == access_key_id
+        ]
+        for sid in dead:
+            self._sessions.pop(sid, None)
+        return len(dead)
+
     def _purge_expired(self) -> None:
         now = utc_now_ms()
         dead = [sid for sid, s in self._sessions.items() if s.expires_at <= now]

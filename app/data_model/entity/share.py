@@ -46,6 +46,7 @@ class ShareAdminQueryEntity:
     access_mode: str | None = None
     created_from: int | None = None
     created_to: int | None = None
+    owner_user_id: int | None = None
     sort_by: str = "CREATED_AT"
     sort_order: str = "DESC"
     limit: int = 200

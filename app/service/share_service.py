@@ -51,6 +51,7 @@ class ShareService:
         access_mode: str,
         allow_export: bool,
         access_key_id: int | None,
+        owner_user_id: int | None = None,
     ) -> tuple[str, bool, int | None]:
         access_mode = access_mode.upper()
         if access_mode not in {ACCESS_MODE_PUBLIC, ACCESS_MODE_KEY_REQUIRED}:
@@ -58,7 +59,9 @@ class ShareService:
         if access_mode == ACCESS_MODE_KEY_REQUIRED:
             if access_key_id is None:
                 raise ValueError("KEY_REQUIRED 分享必须选择一把密钥")
-            key = await access_key_service.get(access_key_id)
+            key = await access_key_service.get(
+                access_key_id, owner_user_id=owner_user_id
+            )
             if key is None or not access_key_service.is_usable(key):
                 raise ValueError("所选密钥不存在、已吊销或已过期")
             return access_mode, bool(allow_export), access_key_id
@@ -87,18 +90,17 @@ class ShareService:
         access_mode: str,
         allow_export: bool,
         access_key_id: int | None,
+        owner_user_id: int,
     ) -> ShareEntity:
         access_mode, allow_export, access_key_id = await self._normalize_share_options(
             access_mode=access_mode,
             allow_export=allow_export,
             access_key_id=access_key_id,
+            owner_user_id=owner_user_id,
         )
-        if self._storage.read_meta(minute_token) is None:
+        if self._storage.read_meta(minute_token, owner_user_id=owner_user_id) is None:
             raise LookupError("本地未找到该会议，请先下载")
 
-        from app.service.metadata_db_service import get_admin_user_id
-
-        owner_id = await get_admin_user_id()
         entity = ShareCreateEntity(
             share_token=secrets.token_urlsafe(16),
             minute_token=minute_token,
@@ -106,7 +108,7 @@ class ShareService:
             allow_export=allow_export,
             access_key_id=access_key_id,
             created_at=utc_now_ms(),
-            owner_user_id=owner_id,
+            owner_user_id=owner_user_id,
         )
         async with UnitOfWork() as uow:
             assert uow.shares is not None
@@ -115,13 +117,14 @@ class ShareService:
         return created
 
     async def ensure_shares_batch(
-        self, body: ShareBatchEnsureEntity
+        self, body: ShareBatchEnsureEntity, *, owner_user_id: int
     ) -> list[ShareBatchItemEntity]:
         """批量创建/复用分享：一次校验密钥、一次查库、一次落库。"""
         access_mode, allow_export, access_key_id = await self._normalize_share_options(
             access_mode=body.access_mode,
             allow_export=body.allow_export,
             access_key_id=body.access_key_id,
+            owner_user_id=owner_user_id,
         )
 
         seen: set[str] = set()
@@ -135,9 +138,7 @@ class ShareService:
         if not ordered_tokens:
             raise ValueError("minute_tokens 不能为空")
 
-        from app.service.metadata_db_service import get_admin_user_id
-
-        owner_id = await get_admin_user_id()
+        owner_id = owner_user_id
         async with UnitOfWork() as uow:
             assert uow.shares is not None
             existing = await uow.shares.list_active_by_minutes(ordered_tokens)
@@ -149,7 +150,9 @@ class ShareService:
             created_now: dict[str, ShareEntity] = {}
             now = utc_now_ms()
             for minute_token in ordered_tokens:
-                if self._storage.read_meta(minute_token) is None:
+                if self._storage.read_meta(
+                    minute_token, owner_user_id=owner_id
+                ) is None:
                     results.append(
                         ShareBatchItemEntity(
                             minute_token=minute_token,
@@ -162,7 +165,8 @@ class ShareService:
                     (
                         s
                         for s in by_minute.get(minute_token, [])
-                        if self._share_matches(
+                        if s.owner_user_id == owner_id
+                        and self._share_matches(
                             s,
                             access_mode=access_mode,
                             allow_export=allow_export,
@@ -211,10 +215,14 @@ class ShareService:
                 )
             return results
 
-    async def list_shares(self, minute_token: str) -> list[ShareEntity]:
+    async def list_shares(
+        self, minute_token: str, *, owner_user_id: int | None = None
+    ) -> list[ShareEntity]:
         async with UnitOfWork() as uow:
             assert uow.shares is not None
-            return await uow.shares.list_by_minute(minute_token)
+            return await uow.shares.list_by_minute(
+                minute_token, owner_user_id=owner_user_id
+            )
 
     async def list_all_shares(
         self,
@@ -238,7 +246,15 @@ class ShareService:
         items: list[ShareAdminItemEntity] = []
         keyword = (q.q or "").strip().lower()
         for share in rows:
-            meta = self._storage.read_meta(share.minute_token) or {}
+            if share.owner_user_id is None:
+                meta = {}
+            else:
+                meta = (
+                    self._storage.read_meta(
+                        share.minute_token, owner_user_id=share.owner_user_id
+                    )
+                    or {}
+                )
             title = meta.get("title")
             title_str = str(title) if title else None
             if keyword:
@@ -268,11 +284,15 @@ class ShareService:
         end = start + max(1, min(q.limit, 500))
         return ShareAdminListEntity(items=items[start:end], total=total)
 
-    async def update_share(self, body: ShareUpdateEntity) -> ShareEntity:
+    async def update_share(
+        self, body: ShareUpdateEntity, *, owner_user_id: int | None = None
+    ) -> ShareEntity:
         async with UnitOfWork() as uow:
             assert uow.shares is not None
             row = await uow.shares.get_by_id(body.id)
             if row is None:
+                raise LookupError("分享不存在")
+            if owner_user_id is not None and row.owner_user_id != owner_user_id:
                 raise LookupError("分享不存在")
             if row.revoked_at is not None:
                 raise ValueError("已吊销的分享不能修改")
@@ -290,6 +310,7 @@ class ShareService:
                     access_mode=ACCESS_MODE_PUBLIC,
                     allow_export=new_export,
                     access_key_id=None,
+                    owner_user_id=owner_user_id,
                 )
                 clear_access_key = True
             else:
@@ -302,6 +323,7 @@ class ShareService:
                     access_mode=ACCESS_MODE_KEY_REQUIRED,
                     allow_export=new_export,
                     access_key_id=key_id,
+                    owner_user_id=owner_user_id,
                 )
                 clear_access_key = False
 
@@ -325,11 +347,15 @@ class ShareService:
             )
         return updated
 
-    async def revoke_share(self, share_id: int) -> ShareEntity:
+    async def revoke_share(
+        self, share_id: int, *, owner_user_id: int | None = None
+    ) -> ShareEntity:
         async with UnitOfWork() as uow:
             assert uow.shares is not None
             row = await uow.shares.get_by_id(share_id)
             if row is None:
+                raise LookupError("分享不存在")
+            if owner_user_id is not None and row.owner_user_id != owner_user_id:
                 raise LookupError("分享不存在")
             if row.revoked_at is not None:
                 return row
@@ -340,7 +366,9 @@ class ShareService:
         share_session_store.invalidate_share(share_id)
         return updated
 
-    async def batch_update_shares(self, body: ShareBatchUpdateEntity) -> ShareBatchResultEntity:
+    async def batch_update_shares(
+        self, body: ShareBatchUpdateEntity, *, owner_user_id: int | None = None
+    ) -> ShareBatchResultEntity:
         if not body.share_ids:
             raise ValueError("share_ids 不能为空")
         if (
@@ -360,7 +388,8 @@ class ShareService:
                         access_mode=body.access_mode,
                         allow_export=body.allow_export,
                         access_key_id=body.access_key_id,
-                    )
+                    ),
+                    owner_user_id=owner_user_id,
                 )
                 results.append(
                     ShareBatchResultItemEntity(id=share_id, ok=True, share=updated)
@@ -387,14 +416,18 @@ class ShareService:
             failed_count=len(results) - success,
         )
 
-    async def batch_revoke_shares(self, body: ShareBatchRevokeEntity) -> ShareBatchResultEntity:
+    async def batch_revoke_shares(
+        self, body: ShareBatchRevokeEntity, *, owner_user_id: int | None = None
+    ) -> ShareBatchResultEntity:
         if not body.share_ids:
             raise ValueError("share_ids 不能为空")
         results: list[ShareBatchResultItemEntity] = []
         success = 0
         for share_id in body.share_ids:
             try:
-                updated = await self.revoke_share(share_id)
+                updated = await self.revoke_share(
+                    share_id, owner_user_id=owner_user_id
+                )
                 results.append(
                     ShareBatchResultItemEntity(id=share_id, ok=True, share=updated)
                 )
@@ -427,7 +460,14 @@ class ShareService:
 
     async def get_meta(self, share_token: str) -> dict:
         share = await self._require_active_share(share_token)
-        meta = self._storage.read_meta(share.minute_token) or {}
+        if share.owner_user_id is None:
+            raise LookupError("分享不存在或已失效")
+        meta = (
+            self._storage.read_meta(
+                share.minute_token, owner_user_id=share.owner_user_id
+            )
+            or {}
+        )
         return {
             "share_token": share.share_token,
             "minute_token": share.minute_token,
@@ -630,7 +670,14 @@ class ShareService:
 
         items_by_token: dict[str, ShareLibraryItemEntity] = {}
         for share in shares_by_key:
-            meta = self._storage.read_meta(share.minute_token) or {}
+            if share.owner_user_id is None:
+                continue
+            meta = (
+                self._storage.read_meta(
+                    share.minute_token, owner_user_id=share.owner_user_id
+                )
+                or {}
+            )
             title = str(meta.get("title") or share.minute_token)
             items_by_token[share.share_token] = ShareLibraryItemEntity(
                 share_token=share.share_token,
@@ -649,7 +696,14 @@ class ShareService:
             # 本机记过会话的公开分享也纳入；需密钥分享仅靠有效密钥枚举
             if share.access_mode != ACCESS_MODE_PUBLIC:
                 continue
-            meta = self._storage.read_meta(share.minute_token) or {}
+            if share.owner_user_id is None:
+                continue
+            meta = (
+                self._storage.read_meta(
+                    share.minute_token, owner_user_id=share.owner_user_id
+                )
+                or {}
+            )
             title = str(meta.get("title") or share.minute_token)
             items_by_token[share.share_token] = ShareLibraryItemEntity(
                 share_token=share.share_token,
@@ -688,6 +742,13 @@ class ShareService:
         session = share_session_store.get(session_id)
         if session is None or session.share_token != share_token:
             raise PermissionError("请先使用密钥解锁分享")
+
+        # 密钥吊销后会话可能尚未过期：每次访问复核密钥仍可用
+        if share.access_key_id is not None:
+            key = await access_key_service.get(share.access_key_id)
+            if key is None or not access_key_service.is_usable(key):
+                share_session_store.invalidate_share(share.id)  # type: ignore[arg-type]
+                raise PermissionError("分享密钥已失效，请重新解锁")
 
         if action in {ACTION_EXPORT, ACTION_MEDIA} and share.access_key_id is not None:
             await self._log_action(

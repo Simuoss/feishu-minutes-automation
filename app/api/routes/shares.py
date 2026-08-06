@@ -4,6 +4,7 @@ import mimetypes
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
+from app.core.auth_context import require_user_id, owner_scope_user_id
 from app.core.config import settings
 from app.data_model.entity.share import (
     ShareAdminQueryEntity,
@@ -12,7 +13,11 @@ from app.data_model.entity.share import (
     ShareBatchUpdateEntity,
     ShareUpdateEntity,
 )
-from app.dto.feishu.meeting import LocalMediaFileResponse, LocalMeetingDetailResponse
+from app.dto.feishu.meeting import (
+    LocalMediaFileResponse,
+    LocalMeetingDetailResponse,
+    LocalTranscriptResponse,
+)
 from app.dto.share import (
     ShareBatchCreateRequest,
     ShareBatchCreateResponse,
@@ -39,7 +44,9 @@ from app.service.export_service import export_service
 from app.service.http_download import content_disposition
 from app.service.meeting_list_service import MeetingListService
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.ownership import assert_meeting_readable
 from app.service.r2_media_service import r2_media_service
+from app.service.redaction_access import assert_asset_safe_to_serve
 from app.service.share_service import (
     ACTION_EXPORT,
     ACTION_MEDIA,
@@ -83,13 +90,22 @@ def _session_id(request: Request, header_value: str | None) -> str | None:
 
 
 @admin_router.post("/meetings/{minute_token}/shares", response_model=ShareResponse)
-async def create_share(minute_token: str, body: ShareCreateRequest) -> ShareResponse:
+async def create_share(
+    minute_token: str,
+    body: ShareCreateRequest,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> ShareResponse:
+    owner_id = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
     try:
         entity = await share_service.create_share(
             minute_token=minute_token,
             access_mode=body.access_mode,
             allow_export=body.allow_export,
             access_key_id=body.access_key_id,
+            owner_user_id=owner_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -99,15 +115,33 @@ async def create_share(minute_token: str, body: ShareCreateRequest) -> ShareResp
 
 
 @admin_router.post("/shares/batch", response_model=ShareBatchCreateResponse)
-async def create_shares_batch(body: ShareBatchCreateRequest) -> ShareBatchCreateResponse:
+async def create_shares_batch(
+    body: ShareBatchCreateRequest,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> ShareBatchCreateResponse:
+    owned_tokens: list[str] = []
+    resolved_owner: int | None = None
+    for token in body.minute_tokens:
+        try:
+            owner = await assert_meeting_readable(
+                request, token, owner_user_id=owner_user_id
+            )
+            owned_tokens.append(token)
+            resolved_owner = owner
+        except HTTPException:
+            continue
+    if not owned_tokens or resolved_owner is None:
+        raise HTTPException(status_code=404, detail="没有可分享的会议（仅能分享自己的）")
     try:
         items = await share_service.ensure_shares_batch(
             ShareBatchEnsureEntity(
-                minute_tokens=body.minute_tokens,
+                minute_tokens=owned_tokens,
                 access_mode=body.access_mode,
                 allow_export=body.allow_export,
                 access_key_id=body.access_key_id,
-            )
+            ),
+            owner_user_id=resolved_owner,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -125,8 +159,15 @@ async def create_shares_batch(body: ShareBatchCreateRequest) -> ShareBatchCreate
 
 
 @admin_router.get("/meetings/{minute_token}/shares", response_model=ShareListResponse)
-async def list_shares(minute_token: str) -> ShareListResponse:
-    items = await share_service.list_shares(minute_token)
+async def list_shares(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> ShareListResponse:
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    items = await share_service.list_shares(minute_token, owner_user_id=owner)
     return ShareListResponse(items=[_share_response(i) for i in items])
 
 
@@ -143,6 +184,7 @@ def _parse_bool_query(value: str | None) -> bool | None:
 
 @admin_router.get("/shares", response_model=ShareListResponse)
 async def list_all_shares(
+    request: Request,
     include_revoked: bool = Query(default=False),
     status: str | None = Query(default=None, description="ACTIVE / REVOKED / ALL"),
     minute_token: str | None = Query(default=None),
@@ -180,6 +222,7 @@ async def list_all_shares(
             access_mode=access_mode.upper() if access_mode else None,
             created_from=created_from,
             created_to=created_to,
+            owner_user_id=owner_scope_user_id(request),
             sort_by=sort_by.upper(),
             sort_order=sort_order.upper(),
             limit=limit,
@@ -193,7 +236,10 @@ async def list_all_shares(
 
 
 @admin_router.patch("/shares/{share_id}", response_model=ShareResponse)
-async def update_share(share_id: int, body: ShareUpdateRequest) -> ShareResponse:
+async def update_share(
+    share_id: int, body: ShareUpdateRequest, request: Request
+) -> ShareResponse:
+    owner_id = require_user_id(request)
     if (
         body.access_mode is None
         and body.allow_export is None
@@ -207,7 +253,8 @@ async def update_share(share_id: int, body: ShareUpdateRequest) -> ShareResponse
                 access_mode=body.access_mode,
                 allow_export=body.allow_export,
                 access_key_id=body.access_key_id,
-            )
+            ),
+            owner_user_id=owner_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -233,7 +280,10 @@ def _batch_result_response(result) -> ShareBatchResultResponse:
 
 
 @admin_router.post("/shares/batch-update", response_model=ShareBatchResultResponse)
-async def batch_update_shares(body: ShareBatchUpdateRequest) -> ShareBatchResultResponse:
+async def batch_update_shares(
+    body: ShareBatchUpdateRequest, request: Request
+) -> ShareBatchResultResponse:
+    owner_id = require_user_id(request)
     try:
         result = await share_service.batch_update_shares(
             ShareBatchUpdateEntity(
@@ -241,7 +291,8 @@ async def batch_update_shares(body: ShareBatchUpdateRequest) -> ShareBatchResult
                 access_mode=body.access_mode,
                 allow_export=body.allow_export,
                 access_key_id=body.access_key_id,
-            )
+            ),
+            owner_user_id=owner_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -249,10 +300,14 @@ async def batch_update_shares(body: ShareBatchUpdateRequest) -> ShareBatchResult
 
 
 @admin_router.post("/shares/batch-revoke", response_model=ShareBatchResultResponse)
-async def batch_revoke_shares(body: ShareBatchRevokeRequest) -> ShareBatchResultResponse:
+async def batch_revoke_shares(
+    body: ShareBatchRevokeRequest, request: Request
+) -> ShareBatchResultResponse:
+    owner_id = require_user_id(request)
     try:
         result = await share_service.batch_revoke_shares(
-            ShareBatchRevokeEntity(share_ids=body.share_ids)
+            ShareBatchRevokeEntity(share_ids=body.share_ids),
+            owner_user_id=owner_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -260,9 +315,10 @@ async def batch_revoke_shares(body: ShareBatchRevokeRequest) -> ShareBatchResult
 
 
 @admin_router.delete("/shares/{share_id}", response_model=ShareResponse)
-async def revoke_share(share_id: int) -> ShareResponse:
+async def revoke_share(share_id: int, request: Request) -> ShareResponse:
+    owner_id = require_user_id(request)
     try:
-        entity = await share_service.revoke_share(share_id)
+        entity = await share_service.revoke_share(share_id, owner_user_id=owner_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _share_response(entity)
@@ -382,6 +438,12 @@ async def _authorized_share(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+def _require_share_owner(share) -> int:
+    if share.owner_user_id is None:
+        raise HTTPException(status_code=404, detail="分享不存在或已失效")
+    return int(share.owner_user_id)
+
+
 @guest_router.get("/{share_token}/detail", response_model=LocalMeetingDetailResponse)
 async def share_detail(
     share_token: str,
@@ -391,12 +453,17 @@ async def share_detail(
     share = await _authorized_share(
         share_token, request, x_share_session, action="VIEW"
     )
-    detail = _list_service.get_local_meeting(share.minute_token)
+    owner = _require_share_owner(share)
+    detail = await _list_service.get_local_meeting_async(
+        share.minute_token, owner_user_id=owner
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="本地未找到该会议资源")
 
     base = settings.api_public_base.rstrip("/")
-    signed_video = await r2_media_service.presign_share_video(share.minute_token)
+    signed_video = await r2_media_service.presign_share_video(
+        share.minute_token, owner_user_id=owner
+    )
     media_files: list[LocalMediaFileResponse] = []
     for mf in detail.get("media_files", []):
         local_url = f"{base}/api/v1/share/{share_token}/media/{mf['name']}"
@@ -410,7 +477,11 @@ async def share_detail(
         )
     has_video = bool(detail.get("has_video"))
     if signed_video and not any(m.kind == "video" for m in media_files):
-        video_meta = r2_media_service.read_meta(share.minute_token).get("video") or {}
+        video_meta = (
+            await r2_media_service.read_meta_async(
+                share.minute_token, owner_user_id=owner
+            )
+        ).get("video") or {}
         media_files.append(
             LocalMediaFileResponse(
                 name=str(video_meta.get("source_name") or "video.mp4"),
@@ -425,8 +496,31 @@ async def share_detail(
         duration_ms=detail.get("duration_ms"),
         has_video=has_video,
         media_files=media_files,
-        transcript=detail.get("transcript"),
+        has_transcript=bool(detail.get("has_transcript")),
         downloaded_at=detail.get("downloaded_at"),
+    )
+
+
+@guest_router.get(
+    "/{share_token}/transcript",
+    response_model=LocalTranscriptResponse,
+)
+async def share_transcript(
+    share_token: str,
+    request: Request,
+    x_share_session: str | None = Header(default=None),
+) -> LocalTranscriptResponse:
+    share = await _authorized_share(
+        share_token, request, x_share_session, action="VIEW"
+    )
+    owner = _require_share_owner(share)
+    text = await _storage.read_transcript_async(
+        share.minute_token, owner_user_id=owner
+    )
+    if text is None:
+        raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
+    return LocalTranscriptResponse(
+        minute_token=share.minute_token, transcript=text
     )
 
 
@@ -439,7 +533,10 @@ async def share_summary(
     share = await _authorized_share(
         share_token, request, x_share_session, action="VIEW"
     )
-    detail = _storage.read_summary(share.minute_token)
+    owner = _require_share_owner(share)
+    detail = await _storage.read_summary_async(
+        share.minute_token, owner_user_id=owner
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="该会议尚未生成纪要")
     meta = detail.get("meta") or {}
@@ -462,11 +559,19 @@ async def share_summary_asset(
     share = await _authorized_share(
         share_token, request, x_share_session, action=ACTION_MEDIA
     )
-    signed = await r2_media_service.presign_asset(share.minute_token, filename)
+    owner = _require_share_owner(share)
+    await assert_asset_safe_to_serve(
+        share.minute_token, filename, owner_user_id=owner
+    )
+    signed = await r2_media_service.presign_asset(
+        share.minute_token, filename, owner_user_id=owner
+    )
     if signed:
         return RedirectResponse(url=signed, status_code=302)
 
-    path = _storage.resolve_asset_path(share.minute_token, filename)
+    path = _storage.resolve_asset_path(
+        share.minute_token, filename, owner_user_id=owner
+    )
     if path is None:
         raise HTTPException(status_code=404, detail="配图不存在")
     media_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
@@ -483,7 +588,10 @@ async def share_media(
     share = await _authorized_share(
         share_token, request, x_share_session, action=ACTION_MEDIA
     )
-    path = _storage.resolve_media_path(share.minute_token, filename)
+    owner = _require_share_owner(share)
+    path = _storage.resolve_media_path(
+        share.minute_token, filename, owner_user_id=owner
+    )
     if path is None:
         raise HTTPException(status_code=404, detail="媒体文件不存在")
     media_type, _ = mimetypes.guess_type(path.name)
@@ -504,8 +612,11 @@ async def share_export_summary(
         action=ACTION_EXPORT,
         require_export=True,
     )
+    owner = _require_share_owner(share)
     try:
-        data, filename, media_type = export_service.export_summary(share.minute_token, format)
+        data, filename, media_type = export_service.export_summary(
+            share.minute_token, format, owner_user_id=owner
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -532,8 +643,11 @@ async def share_export_transcript(
         action=ACTION_EXPORT,
         require_export=True,
     )
+    owner = _require_share_owner(share)
     try:
-        data, filename, media_type = export_service.export_transcript(share.minute_token, format)
+        data, filename, media_type = export_service.export_transcript(
+            share.minute_token, format, owner_user_id=owner
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(

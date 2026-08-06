@@ -33,24 +33,70 @@ class R2MediaService:
     def enabled(self) -> bool:
         return r2_client.configured
 
-    def asset_key(self, minute_token: str, filename: str) -> str:
+    def asset_key(self, minute_token: str, filename: str, *, owner_user_id: int) -> str:
         name = Path(unquote(filename)).name
-        return f"meetings/{minute_token}/assets/{name}"
+        return f"meetings/{owner_user_id}/{minute_token}/assets/{name}"
 
-    def share_video_key(self, minute_token: str) -> str:
-        return f"meetings/{minute_token}/share/video.mp4"
+    def share_video_key(self, minute_token: str, *, owner_user_id: int) -> str:
+        return f"meetings/{owner_user_id}/{minute_token}/share/video.mp4"
 
-    def _r2_cache_dir(self, minute_token: str) -> Path:
-        path = self._storage.get_meeting_dir(minute_token) / "agent" / "r2-cache"
+    def _assert_owned_object_key(
+        self, key: str, *, owner_user_id: int, minute_token: str
+    ) -> str:
+        """拒绝 DB meta 里指向他人前缀的脏 key，防止跨租户预签名。
+
+        允许两种前缀：
+        - 新：meetings/{owner}/{token}/...
+        - 旧：meetings/{token}/...（磁盘/R2 迁 owner 前上传的对象）
+        """
+        normalized = str(key or "").strip().lstrip("/")
+        if not normalized or ".." in normalized:
+            logger.error(
+                "R2 object key 非法，拒绝签名/拉取。owner=%s token=%s key=%s",
+                owner_user_id,
+                minute_token,
+                key,
+            )
+            raise ValueError("R2 object key 非法")
+        owned_prefix = f"meetings/{owner_user_id}/{minute_token}/"
+        legacy_prefix = f"meetings/{minute_token}/"
+        if normalized.startswith(owned_prefix) or normalized.startswith(
+            legacy_prefix
+        ):
+            return normalized
+        logger.error(
+            "R2 object key 不属于当前会议，拒绝签名/拉取。"
+            "owner=%s token=%s key=%s",
+            owner_user_id,
+            minute_token,
+            key,
+        )
+        raise ValueError("R2 object key 与会议归属不一致")
+
+    def _r2_cache_dir(self, minute_token: str, *, owner_user_id: int) -> Path:
+        path = (
+            self._storage.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
+            / "agent"
+            / "r2-cache"
+        )
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def read_meta(self, minute_token: str) -> dict[str, Any]:
-        from app.core.async_bridge import run_async
+    @staticmethod
+    def _normalize_meta(data: dict[str, Any] | None) -> dict[str, Any]:
+        if not data:
+            return {"assets": {}, "video": {}}
+        assets = data.get("assets") if isinstance(data.get("assets"), dict) else {}
+        video = data.get("video") if isinstance(data.get("video"), dict) else {}
+        return {"assets": assets, "video": video}
+
+    async def read_meta_async(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> dict[str, Any]:
         from app.service.metadata_db_service import read_r2_meta
 
         try:
-            data = run_async(read_r2_meta(minute_token))
+            data = await read_r2_meta(minute_token, owner_user_id=owner_user_id)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "从 DB 读取 R2 同步状态失败 token=%s，将按空状态继续。err=%s",
@@ -58,18 +104,24 @@ class R2MediaService:
                 exc,
             )
             return {"assets": {}, "video": {}}
-        if not data:
-            return {"assets": {}, "video": {}}
-        assets = data.get("assets") if isinstance(data.get("assets"), dict) else {}
-        video = data.get("video") if isinstance(data.get("video"), dict) else {}
-        return {"assets": assets, "video": video}
+        return self._normalize_meta(data)
 
-    def write_meta(self, minute_token: str, meta: dict[str, Any]) -> None:
+    def read_meta(self, minute_token: str, *, owner_user_id: int) -> dict[str, Any]:
+        """同步门面：供 worker 使用；async 路由请用 read_meta_async。"""
+        from app.core.async_bridge import run_async
+
+        return run_async(
+            self.read_meta_async(minute_token, owner_user_id=owner_user_id)
+        )
+
+    def write_meta(
+        self, minute_token: str, meta: dict[str, Any], *, owner_user_id: int
+    ) -> None:
         from app.core.async_bridge import run_async
         from app.service.metadata_db_service import upsert_r2_meta
 
         try:
-            run_async(upsert_r2_meta(minute_token, meta))
+            run_async(upsert_r2_meta(minute_token, meta, owner_user_id=owner_user_id))
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "写入 R2 同步状态到 DB 失败 token=%s，后续可能重复上传。err=%s",
@@ -78,13 +130,24 @@ class R2MediaService:
             )
             raise
 
-    def video_ready(self, minute_token: str) -> bool:
-        video = self.read_meta(minute_token).get("video") or {}
+    def video_ready(self, minute_token: str, *, owner_user_id: int) -> bool:
+        video = self.read_meta(minute_token, owner_user_id=owner_user_id).get("video") or {}
         return video.get("status") == VIDEO_STATUS_READY and bool(video.get("key"))
 
-    def asset_recorded(self, minute_token: str, filename: str) -> bool:
+    async def video_ready_async(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> bool:
+        meta = await self.read_meta_async(
+            minute_token, owner_user_id=owner_user_id
+        )
+        video = meta.get("video") or {}
+        return video.get("status") == VIDEO_STATUS_READY and bool(video.get("key"))
+
+    def asset_recorded(
+        self, minute_token: str, filename: str, *, owner_user_id: int
+    ) -> bool:
         name = Path(unquote(filename)).name
-        assets = self.read_meta(minute_token).get("assets") or {}
+        assets = self.read_meta(minute_token, owner_user_id=owner_user_id).get("assets") or {}
         item = assets.get(name)
         return isinstance(item, dict) and bool(item.get("key"))
 
@@ -103,16 +166,22 @@ class R2MediaService:
                 exc,
             )
 
-    def purge_local_asset(self, minute_token: str, filename: str) -> None:
-        path = self._storage.resolve_asset_path(minute_token, filename)
+    def purge_local_asset(
+        self, minute_token: str, filename: str, *, owner_user_id: int
+    ) -> None:
+        path = self._storage.resolve_asset_path(
+            minute_token, filename, owner_user_id=owner_user_id
+        )
         if path is not None:
             self._unlink_quiet(path, what="配图", minute_token=minute_token)
 
-    def purge_local_assets_dir(self, minute_token: str) -> int:
-        assets_dir = self._storage.get_assets_dir(minute_token)
+    def purge_local_assets_dir(self, minute_token: str, *, owner_user_id: int) -> int:
+        assets_dir = self._storage.get_assets_dir(
+            minute_token, owner_user_id=owner_user_id
+        )
         if not assets_dir.is_dir():
             return 0
-        meta = self.read_meta(minute_token)
+        meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
         assets_meta = meta.get("assets") or {}
         deleted = 0
         for path in list(assets_dir.iterdir()):
@@ -124,22 +193,28 @@ class R2MediaService:
                 deleted += 1
         return deleted
 
-    def purge_local_videos(self, minute_token: str) -> int:
+    def purge_local_videos(self, minute_token: str, *, owner_user_id: int) -> int:
         """删除 raw/media 下视频及临时缓存（仅在 R2 视频 READY 后调用）。"""
         deleted = 0
-        media_dir = self._storage.get_meeting_dir(minute_token) / "raw" / "media"
+        media_dir = (
+            self._storage.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
+            / "raw"
+            / "media"
+        )
         if media_dir.is_dir():
             for path in list(media_dir.iterdir()):
                 if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
                     self._unlink_quiet(path, what="原片视频", minute_token=minute_token)
                     deleted += 1
-        cache_video = self._r2_cache_dir(minute_token) / "video.mp4"
+        cache_video = self._r2_cache_dir(
+            minute_token, owner_user_id=owner_user_id
+        ) / "video.mp4"
         if cache_video.is_file():
             self._unlink_quiet(cache_video, what="视频缓存", minute_token=minute_token)
             deleted += 1
         # 历史预压缩目录
         pre = (
-            self._storage.get_meeting_dir(minute_token)
+            self._storage.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
             / "agent"
             / "r2-compress-test"
             / "share.mp4"
@@ -149,15 +224,17 @@ class R2MediaService:
             deleted += 1
         return deleted
 
-    async def sync_assets(self, minute_token: str) -> int:
+    async def sync_assets(self, minute_token: str, *, owner_user_id: int) -> int:
         """把本地 output/assets 上传到 R2；已在云上的本地文件随即删除。"""
         if not self.enabled():
             return 0
-        assets_dir = self._storage.get_assets_dir(minute_token)
+        assets_dir = self._storage.get_assets_dir(
+            minute_token, owner_user_id=owner_user_id
+        )
         if not assets_dir.is_dir():
             return 0
 
-        meta = self.read_meta(minute_token)
+        meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
         assets_meta: dict[str, Any] = dict(meta.get("assets") or {})
         uploaded = 0
         for path in sorted(assets_dir.iterdir()):
@@ -168,7 +245,7 @@ class R2MediaService:
             if isinstance(existing, dict) and existing.get("key"):
                 self._unlink_quiet(path, what="配图", minute_token=minute_token)
                 continue
-            key = self.asset_key(minute_token, name)
+            key = self.asset_key(minute_token, name, owner_user_id=owner_user_id)
             content_type = mimetypes.guess_type(name)[0] or "image/jpeg"
             try:
                 etag = await r2_client.upload_file(path, key, content_type=content_type)
@@ -190,26 +267,40 @@ class R2MediaService:
 
         if uploaded:
             meta["assets"] = assets_meta
-            self.write_meta(minute_token, meta)
+            self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
             logger.info("配图已同步到 R2 并清理本地 token=%s count=%s", minute_token, uploaded)
         return uploaded
 
-    async def ensure_asset_on_r2(self, minute_token: str, filename: str) -> str | None:
+    async def ensure_asset_on_r2(
+        self, minute_token: str, filename: str, *, owner_user_id: int
+    ) -> str | None:
         """确保单张配图在 R2，返回 object key；失败返回 None。"""
         if not self.enabled():
             return None
         name = Path(unquote(filename)).name
-        meta = self.read_meta(minute_token)
+        meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
         assets_meta: dict[str, Any] = dict(meta.get("assets") or {})
         existing = assets_meta.get(name)
         if isinstance(existing, dict) and existing.get("key"):
-            self.purge_local_asset(minute_token, name)
-            return str(existing["key"])
+            try:
+                key = self._assert_owned_object_key(
+                    str(existing["key"]),
+                    owner_user_id=owner_user_id,
+                    minute_token=minute_token,
+                )
+            except ValueError:
+                return None
+            self.purge_local_asset(
+                minute_token, name, owner_user_id=owner_user_id
+            )
+            return key
 
-        local = self._storage.resolve_asset_path(minute_token, name)
+        local = self._storage.resolve_asset_path(
+            minute_token, name, owner_user_id=owner_user_id
+        )
         if local is None:
             return None
-        key = self.asset_key(minute_token, name)
+        key = self.asset_key(minute_token, name, owner_user_id=owner_user_id)
         content_type = mimetypes.guess_type(name)[0] or "image/jpeg"
         try:
             etag = await r2_client.upload_file(local, key, content_type=content_type)
@@ -227,29 +318,43 @@ class R2MediaService:
             "uploaded_at": utc_now_ms(),
         }
         meta["assets"] = assets_meta
-        self.write_meta(minute_token, meta)
+        self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
         self._unlink_quiet(local, what="配图", minute_token=minute_token)
         return key
 
     async def materialize_asset(
-        self, minute_token: str, filename: str
+        self, minute_token: str, filename: str, *, owner_user_id: int
     ) -> Path | None:
         """导出/处理需要本地文件时，优先本地，否则从 R2 拉到缓存。"""
         name = Path(unquote(filename)).name
-        local = self._storage.resolve_asset_path(minute_token, name)
+        local = self._storage.resolve_asset_path(
+            minute_token, name, owner_user_id=owner_user_id
+        )
         if local is not None:
             return local
         if not self.enabled():
             return None
-        meta = self.read_meta(minute_token)
+        meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
         item = (meta.get("assets") or {}).get(name)
         if not isinstance(item, dict) or not item.get("key"):
             return None
-        cache = self._r2_cache_dir(minute_token) / "assets" / name
+        try:
+            object_key = self._assert_owned_object_key(
+                str(item["key"]),
+                owner_user_id=owner_user_id,
+                minute_token=minute_token,
+            )
+        except ValueError:
+            return None
+        cache = (
+            self._r2_cache_dir(minute_token, owner_user_id=owner_user_id)
+            / "assets"
+            / name
+        )
         if cache.is_file():
             return cache
         try:
-            await r2_client.download_file(str(item["key"]), cache)
+            await r2_client.download_file(object_key, cache)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "从 R2 拉取配图失败 token=%s file=%s，导出/复核将缺图。err=%s",
@@ -260,21 +365,39 @@ class R2MediaService:
             return None
         return cache
 
-    async def ensure_local_video(self, minute_token: str) -> Path | None:
+    async def ensure_local_video(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> Path | None:
         """抽帧等处理需要视频时：本地原片优先，否则从 R2 分享片拉缓存。"""
-        local = self._storage.find_video_path(minute_token)
+        local = self._storage.find_video_path(
+            minute_token, owner_user_id=owner_user_id
+        )
         if local is not None:
             return local
-        if not self.enabled() or not self.video_ready(minute_token):
+        if not self.enabled() or not self.video_ready(
+            minute_token, owner_user_id=owner_user_id
+        ):
             return None
-        key = (self.read_meta(minute_token).get("video") or {}).get("key")
+        key = (
+            self.read_meta(minute_token, owner_user_id=owner_user_id).get("video") or {}
+        ).get("key")
         if not key:
             return None
-        cache = self._r2_cache_dir(minute_token) / "video.mp4"
+        try:
+            object_key = self._assert_owned_object_key(
+                str(key),
+                owner_user_id=owner_user_id,
+                minute_token=minute_token,
+            )
+        except ValueError:
+            return None
+        cache = self._r2_cache_dir(
+            minute_token, owner_user_id=owner_user_id
+        ) / "video.mp4"
         if cache.is_file():
             return cache
         try:
-            await r2_client.download_file(str(key), cache)
+            await r2_client.download_file(object_key, cache)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "从 R2 拉取分享视频失败 token=%s，无法抽帧配图。err=%s",
@@ -284,18 +407,39 @@ class R2MediaService:
             return None
         return cache
 
-    async def presign_asset(self, minute_token: str, filename: str) -> str | None:
-        key = await self.ensure_asset_on_r2(minute_token, filename)
+    async def presign_asset(
+        self, minute_token: str, filename: str, *, owner_user_id: int
+    ) -> str | None:
+        key = await self.ensure_asset_on_r2(
+            minute_token, filename, owner_user_id=owner_user_id
+        )
         if not key:
             # 本地已删、仅 DB 有记录时 ensure 可能因本地缺失早退——再读一次 meta
             name = Path(unquote(filename)).name
-            item = (self.read_meta(minute_token).get("assets") or {}).get(name)
+            item = (
+                self.read_meta(minute_token, owner_user_id=owner_user_id).get("assets")
+                or {}
+            ).get(name)
             if isinstance(item, dict) and item.get("key"):
-                key = str(item["key"])
+                try:
+                    key = self._assert_owned_object_key(
+                        str(item["key"]),
+                        owner_user_id=owner_user_id,
+                        minute_token=minute_token,
+                    )
+                except ValueError:
+                    return None
             else:
                 return None
         try:
+            key = self._assert_owned_object_key(
+                str(key),
+                owner_user_id=owner_user_id,
+                minute_token=minute_token,
+            )
             return await r2_client.presign_get(key)
+        except ValueError:
+            return None
         except R2ClientError as exc:
             logger.error(
                 "配图签名 URL 生成失败 token=%s file=%s: %s",
@@ -305,14 +449,27 @@ class R2MediaService:
             )
             return None
 
-    async def presign_share_video(self, minute_token: str) -> str | None:
-        if not self.enabled() or not self.video_ready(minute_token):
+    async def presign_share_video(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> str | None:
+        if not self.enabled() or not self.video_ready(
+            minute_token, owner_user_id=owner_user_id
+        ):
             return None
-        key = (self.read_meta(minute_token).get("video") or {}).get("key")
+        key = (
+            self.read_meta(minute_token, owner_user_id=owner_user_id).get("video") or {}
+        ).get("key")
         if not key:
             return None
         try:
-            return await r2_client.presign_get(str(key))
+            object_key = self._assert_owned_object_key(
+                str(key),
+                owner_user_id=owner_user_id,
+                minute_token=minute_token,
+            )
+            return await r2_client.presign_get(object_key)
+        except ValueError:
+            return None
         except R2ClientError as exc:
             logger.error(
                 "分享视频签名 URL 生成失败 token=%s: %s",
@@ -321,25 +478,30 @@ class R2MediaService:
             )
             return None
 
-    def _video_lock(self, minute_token: str) -> asyncio.Lock:
-        lock = _video_locks.get(minute_token)
+    def _video_lock(self, minute_token: str, *, owner_user_id: int) -> asyncio.Lock:
+        lock_key = f"{owner_user_id}:{minute_token}"
+        lock = _video_locks.get(lock_key)
         if lock is None:
             lock = asyncio.Lock()
-            _video_locks[minute_token] = lock
+            _video_locks[lock_key] = lock
         return lock
 
-    async def ensure_share_video(self, minute_token: str) -> None:
+    async def ensure_share_video(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> None:
         """压缩本地视频并上传 R2；成功后删除本地原片。"""
         if not self.enabled():
             return
-        async with self._video_lock(minute_token):
-            meta = self.read_meta(minute_token)
+        async with self._video_lock(minute_token, owner_user_id=owner_user_id):
+            meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
             video_meta = dict(meta.get("video") or {})
             if video_meta.get("status") == VIDEO_STATUS_READY and video_meta.get("key"):
-                self.purge_local_videos(minute_token)
+                self.purge_local_videos(minute_token, owner_user_id=owner_user_id)
                 return
 
-            source = self._storage.find_video_path(minute_token)
+            source = self._storage.find_video_path(
+                minute_token, owner_user_id=owner_user_id
+            )
             if source is None:
                 logger.info(
                     "妙记无本地视频，跳过 R2 分享压缩 token=%s",
@@ -349,12 +511,14 @@ class R2MediaService:
 
             video_meta = {
                 "status": VIDEO_STATUS_PENDING,
-                "key": self.share_video_key(minute_token),
+                "key": self.share_video_key(
+                    minute_token, owner_user_id=owner_user_id
+                ),
                 "updated_at": utc_now_ms(),
                 "error": None,
             }
             meta["video"] = video_meta
-            self.write_meta(minute_token, meta)
+            self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
 
             try:
                 with tempfile.TemporaryDirectory(prefix="r2-share-") as tmp:
@@ -365,7 +529,7 @@ class R2MediaService:
                         video_meta["key"],
                         content_type="video/mp4",
                     )
-                meta = self.read_meta(minute_token)
+                meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
                 meta["video"] = {
                     "status": VIDEO_STATUS_READY,
                     "key": video_meta["key"],
@@ -374,37 +538,38 @@ class R2MediaService:
                     "error": None,
                     "source_name": source.name,
                 }
-                self.write_meta(minute_token, meta)
-                self.purge_local_videos(minute_token)
+                self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+                self.purge_local_videos(minute_token, owner_user_id=owner_user_id)
                 logger.info("分享压缩视频已上传 R2 并清理本地原片 token=%s", minute_token)
             except (FfmpegError, R2ClientError, OSError) as exc:
-                meta = self.read_meta(minute_token)
+                meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
                 meta["video"] = {
                     "status": VIDEO_STATUS_FAILED,
                     "key": video_meta.get("key"),
                     "updated_at": utc_now_ms(),
                     "error": str(exc),
                 }
-                self.write_meta(minute_token, meta)
+                self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
                 logger.error(
                     "分享视频压缩/上传 R2 失败 token=%s，保留本地原片以便重试: %s",
                     minute_token,
                     exc,
                 )
 
-    def spawn_share_video(self, minute_token: str) -> None:
+    def spawn_share_video(self, minute_token: str, *, owner_user_id: int) -> None:
         if not self.enabled():
             return
+        owner = owner_user_id
         task: asyncio.Task[object] = asyncio.create_task(
-            self.ensure_share_video(minute_token)
+            self.ensure_share_video(minute_token, owner_user_id=owner)
         )
         _r2_video_tasks.add(task)
         task.add_done_callback(_r2_video_tasks.discard)
         logger.info("已排队压缩并上传分享视频到 R2 token=%s", minute_token)
 
-    async def sync_assets_safe(self, minute_token: str) -> None:
+    async def sync_assets_safe(self, minute_token: str, *, owner_user_id: int) -> None:
         try:
-            await self.sync_assets(minute_token)
+            await self.sync_assets(minute_token, owner_user_id=owner_user_id)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "纪要配图同步 R2 失败 token=%s，本地文件暂保留: %s",

@@ -9,6 +9,7 @@ from app.repository.orm.summary_run import SummaryRunORM
 def _to_entity(orm: SummaryRunORM) -> SummaryRunEntity:
     return SummaryRunEntity(
         id=orm.id,
+        owner_user_id=orm.owner_user_id,
         minute_token=orm.minute_token,
         model=orm.model,
         input_tokens=orm.input_tokens,
@@ -72,29 +73,41 @@ class SummaryRunRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_by_minute_token(self, minute_token: str) -> SummaryRunEntity | None:
-        stmt = select(SummaryRunORM).where(SummaryRunORM.minute_token == minute_token)
+    async def get_by_minute_token(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> SummaryRunEntity | None:
+        stmt = select(SummaryRunORM).where(
+            SummaryRunORM.owner_user_id == owner_user_id,
+            SummaryRunORM.minute_token == minute_token,
+        )
         result = await self._session.execute(stmt)
         orm = result.scalar_one_or_none()
         return _to_entity(orm) if orm else None
 
     async def map_by_minute_tokens(
-        self, minute_tokens: list[str]
+        self, minute_tokens: list[str], *, owner_user_id: int
     ) -> dict[str, SummaryRunEntity]:
         if not minute_tokens:
             return {}
-        stmt = select(SummaryRunORM).where(SummaryRunORM.minute_token.in_(minute_tokens))
+        stmt = select(SummaryRunORM).where(
+            SummaryRunORM.owner_user_id == owner_user_id,
+            SummaryRunORM.minute_token.in_(minute_tokens),
+        )
         result = await self._session.execute(stmt)
         return {orm.minute_token: _to_entity(orm) for orm in result.scalars().all()}
 
     async def upsert(self, entity: SummaryRunUpsertEntity) -> SummaryRunEntity:
         stmt = select(SummaryRunORM).where(
-            SummaryRunORM.minute_token == entity.minute_token
+            SummaryRunORM.owner_user_id == entity.owner_user_id,
+            SummaryRunORM.minute_token == entity.minute_token,
         )
         result = await self._session.execute(stmt)
         orm = result.scalar_one_or_none()
         if orm is None:
-            orm = SummaryRunORM(minute_token=entity.minute_token)
+            orm = SummaryRunORM(
+                owner_user_id=entity.owner_user_id,
+                minute_token=entity.minute_token,
+            )
             self._session.add(orm)
         _apply_upsert(orm, entity)
         await self._session.flush()

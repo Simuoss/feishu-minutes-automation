@@ -7,6 +7,7 @@ from app.core.database import async_session_factory
 from app.repository.access_key_repository import AccessKeyRepository
 from app.repository.feishu_user_token_repository import FeishuUserTokenRepository
 from app.repository.figure_repository import FigureRepository
+from app.repository.invite_code_repository import InviteCodeRepository
 from app.repository.meeting_record_repository import MeetingRecordRepository
 from app.repository.pipeline_job_repository import PipelineJobRepository
 from app.repository.r2_sync_state_repository import R2SyncStateRepository
@@ -27,6 +28,7 @@ class UnitOfWork:
         self.shares: ShareRepository | None = None
         self.share_access_logs: ShareAccessLogRepository | None = None
         self.users: UserRepository | None = None
+        self.invite_codes: InviteCodeRepository | None = None
         self.summary_runs: SummaryRunRepository | None = None
         self.figures: FigureRepository | None = None
         self.redaction_figures: RedactionFigureRepository | None = None
@@ -42,6 +44,7 @@ class UnitOfWork:
         self.shares = ShareRepository(self._session)
         self.share_access_logs = ShareAccessLogRepository(self._session)
         self.users = UserRepository(self._session)
+        self.invite_codes = InviteCodeRepository(self._session)
         self.summary_runs = SummaryRunRepository(self._session)
         self.figures = FigureRepository(self._session)
         self.redaction_figures = RedactionFigureRepository(self._session)

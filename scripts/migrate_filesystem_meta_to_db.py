@@ -1,11 +1,14 @@
 """将 data/meetings 下 JSON 元数据幂等回填到 SQLite。
 
 用法（项目根目录）:
-  python -m scripts.migrate_filesystem_meta_to_db
+  python -m scripts.migrate_filesystem_meta_to_db --owner-user-id 1
+
+必须显式指定归属用户；禁止默认落到任何「主账户」。
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -21,7 +24,6 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.repository.uow import UnitOfWork
 from app.service.metadata_db_service import (
-    get_admin_user_id,
     replace_figures_from_manifest,
     replace_redaction_from_audit,
     upsert_meeting_meta,
@@ -46,7 +48,7 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-async def _migrate_token_file(admin_id: int) -> bool:
+async def _migrate_token_file(owner_user_id: int) -> bool:
     data = _load_json(TOKEN_FILE)
     if not data:
         return False
@@ -68,7 +70,7 @@ async def _migrate_token_file(admin_id: int) -> bool:
         assert uow.feishu_user_tokens is not None
         await uow.feishu_user_tokens.upsert(
             FeishuUserTokenUpsertEntity(
-                user_id=admin_id,
+                user_id=owner_user_id,
                 access_token=data.get("access_token"),
                 refresh_token=data.get("refresh_token"),
                 expires_at=_to_ms(data.get("expires_at")),
@@ -81,17 +83,17 @@ async def _migrate_token_file(admin_id: int) -> bool:
     return True
 
 
-async def _backfill_owners(admin_id: int) -> tuple[int, int]:
+async def _backfill_null_owners(owner_user_id: int) -> tuple[int, int]:
     async with UnitOfWork() as uow:
         assert uow.shares is not None
         assert uow.access_keys is not None
-        shares = await uow.shares.backfill_null_owner(admin_id)
-        keys = await uow.access_keys.backfill_null_owner(admin_id)
+        shares = await uow.shares.backfill_null_owner(owner_user_id)
+        keys = await uow.access_keys.backfill_null_owner(owner_user_id)
         await uow.commit()
     return shares, keys
 
 
-async def migrate_one(meeting_dir: Path) -> dict[str, bool]:
+async def migrate_one(meeting_dir: Path, *, owner_user_id: int) -> dict[str, bool]:
     token = meeting_dir.name
     flags = {
         "meta": False,
@@ -103,37 +105,55 @@ async def migrate_one(meeting_dir: Path) -> dict[str, bool]:
     meta = _load_json(meeting_dir / "meta.json")
     if meta is not None:
         meta.setdefault("minute_token", token)
-        await upsert_meeting_meta(token, meta)
+        await upsert_meeting_meta(token, meta, owner_user_id=owner_user_id)
         flags["meta"] = True
 
     summary_meta = _load_json(meeting_dir / "output" / "summary.meta.json")
     if summary_meta is not None:
-        await upsert_summary_meta(token, summary_meta)
+        await upsert_summary_meta(
+            token, summary_meta, owner_user_id=owner_user_id
+        )
         flags["summary"] = True
 
     manifest = _load_json(meeting_dir / "agent" / "figures.manifest.json")
     if manifest is not None:
-        await replace_figures_from_manifest(token, manifest)
+        await replace_figures_from_manifest(
+            token, manifest, owner_user_id=owner_user_id
+        )
         flags["figures"] = True
 
     audit = _load_json(meeting_dir / "agent" / "redaction" / "audit.json")
     if audit is not None:
-        await replace_redaction_from_audit(token, audit)
+        await replace_redaction_from_audit(
+            token, audit, owner_user_id=owner_user_id
+        )
         flags["redaction"] = True
 
     r2_meta = _load_json(meeting_dir / "output" / "r2.meta.json")
     if r2_meta is not None:
-        await upsert_r2_meta(token, r2_meta)
+        await upsert_r2_meta(token, r2_meta, owner_user_id=owner_user_id)
         flags["r2"] = True
 
     return flags
 
 
 async def main() -> int:
+    parser = argparse.ArgumentParser(description="文件系统元数据迁移到 DB")
+    parser.add_argument(
+        "--owner-user-id",
+        type=int,
+        required=True,
+        help="迁移数据归属的用户 id（必填，禁止默认主账户）",
+    )
+    args = parser.parse_args()
+    owner_user_id = int(args.owner_user_id)
+
     await init_db()
-    admin_id = await get_admin_user_id()
-    if admin_id is None:
-        logger.error("admin 用户不存在，无法继续迁移；请确认 ADMIN_TOKEN 已配置并重启过 init_db")
+    async with UnitOfWork() as uow:
+        assert uow.users is not None
+        user = await uow.users.get_by_id(owner_user_id)
+    if user is None:
+        logger.error("用户 id=%s 不存在，拒绝迁移", owner_user_id)
         return 1
 
     root = Path(settings.storage_root)
@@ -157,7 +177,7 @@ async def main() -> int:
     for meeting_dir in meetings:
         token = meeting_dir.name
         try:
-            flags = await migrate_one(meeting_dir)
+            flags = await migrate_one(meeting_dir, owner_user_id=owner_user_id)
         except Exception as exc:  # noqa: BLE001
             counts["failed"] += 1
             failed_tokens.append(token)
@@ -177,12 +197,13 @@ async def main() -> int:
             flags["r2"],
         )
 
-    token_ok = await _migrate_token_file(admin_id)
-    share_n, key_n = await _backfill_owners(admin_id)
+    token_ok = await _migrate_token_file(owner_user_id)
+    share_n, key_n = await _backfill_null_owners(owner_user_id)
 
     logger.info(
-        "迁移完成 meetings=%d meta=%d summary=%d figures=%d redaction=%d r2=%d "
+        "迁移完成 owner=%s meetings=%d meta=%d summary=%d figures=%d redaction=%d r2=%d "
         "feishu_token=%s shares_owner=%d keys_owner=%d failed=%d",
+        owner_user_id,
         counts["meetings"],
         counts["meta"],
         counts["summary"],

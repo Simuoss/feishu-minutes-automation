@@ -42,6 +42,8 @@ class UserRepository:
         orm = await self._session.get(UserORM, entity.id)
         if orm is None:
             return None
+        if entity.username is not None:
+            orm.username = entity.username
         if entity.password_hash is not None:
             orm.password_hash = entity.password_hash
         if entity.status is not None:
@@ -70,5 +72,10 @@ class UserRepository:
             stmt = stmt.where(UserORM.username == query.username)
         if query.status is not None:
             stmt = stmt.where(UserORM.status == query.status)
+        result = await self._session.execute(stmt)
+        return [_to_entity(orm) for orm in result.scalars().all()]
+
+    async def list_all(self) -> list[UserEntity]:
+        stmt = select(UserORM).order_by(UserORM.id.asc())
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]

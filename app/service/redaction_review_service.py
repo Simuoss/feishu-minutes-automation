@@ -22,9 +22,13 @@ class RedactionReviewService:
     def __init__(self, storage: MeetingStorageService | None = None) -> None:
         self._storage = storage or MeetingStorageService()
 
-    def read_audit(self, minute_token: str) -> dict[str, Any] | None:
+    def read_audit(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> dict[str, Any] | None:
         try:
-            return run_async(read_redaction_audit(minute_token))
+            return run_async(
+                read_redaction_audit(minute_token, owner_user_id=owner_user_id)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "从 DB 读脱敏审计失败 token=%s；怀疑 schema 未就绪。err=%s",
@@ -59,28 +63,40 @@ class RedactionReviewService:
         audit["scanned"] = len(figures)
         return audit
 
-    def _persist_audit(self, minute_token: str, audit: dict[str, Any]) -> None:
-        run_async(replace_redaction_from_audit(minute_token, audit))
+    def _persist_audit(
+        self, minute_token: str, audit: dict[str, Any], *, owner_user_id: int
+    ) -> None:
+        run_async(
+            replace_redaction_from_audit(
+                minute_token, audit, owner_user_id=owner_user_id
+            )
+        )
 
     def approve(
         self,
         minute_token: str,
         figure_id: str,
         regions_raw: list[dict[str, Any]],
+        *,
+        owner_user_id: int,
     ) -> dict[str, Any]:
         regions = parse_regions_from_request(regions_raw)
         if not regions:
             raise ValueError("区域坐标无效，无法打码")
 
         original = self._storage.resolve_agent_relative_path(
-            minute_token, f"agent/redaction/originals/{figure_id}.jpg"
+            minute_token,
+            f"agent/redaction/originals/{figure_id}.jpg",
+            owner_user_id=owner_user_id,
         )
         if original is None:
             raise FileNotFoundError(
                 f"找不到 {figure_id} 的脱敏原图，怀疑尚未跑过脱敏或原图已被清理"
             )
 
-        assets = self._storage.ensure_assets_dir(minute_token)
+        assets = self._storage.ensure_assets_dir(
+            minute_token, owner_user_id=owner_user_id
+        )
         dest = assets / f"{figure_id}.jpg"
         mosaic_regions = []
         for region in regions:
@@ -96,7 +112,7 @@ class RedactionReviewService:
             block_size=settings.summary_redact_mosaic_block,
         )
 
-        audit = self.read_audit(minute_token) or {
+        audit = self.read_audit(minute_token, owner_user_id=owner_user_id) or {
             "figures": [],
             "scanned": 0,
             "sensitive": 0,
@@ -123,7 +139,7 @@ class RedactionReviewService:
             "asset_relative": f"assets/{figure_id}.jpg",
         }
         audit = self._upsert_figure(audit, figure)
-        self._persist_audit(minute_token, audit)
+        self._persist_audit(minute_token, audit, owner_user_id=owner_user_id)
         logger.info("人工放行脱敏配图 token=%s figure=%s", minute_token, figure_id)
         return audit
 
@@ -132,12 +148,16 @@ class RedactionReviewService:
         minute_token: str,
         figure_id: str,
         reason: str,
+        *,
+        owner_user_id: int,
     ) -> dict[str, Any]:
-        asset = self._storage.resolve_asset_path(minute_token, f"{figure_id}.jpg")
+        asset = self._storage.resolve_asset_path(
+            minute_token, f"{figure_id}.jpg", owner_user_id=owner_user_id
+        )
         if asset is not None:
             asset.unlink(missing_ok=True)
 
-        audit = self.read_audit(minute_token) or {
+        audit = self.read_audit(minute_token, owner_user_id=owner_user_id) or {
             "figures": [],
             "scanned": 0,
             "sensitive": 0,
@@ -160,7 +180,7 @@ class RedactionReviewService:
                 figure["attempts"] = item.get("attempts") or []
                 break
         audit = self._upsert_figure(audit, figure)
-        self._persist_audit(minute_token, audit)
+        self._persist_audit(minute_token, audit, owner_user_id=owner_user_id)
         logger.info(
             "人工放弃配图 token=%s figure=%s reason=%s",
             minute_token,

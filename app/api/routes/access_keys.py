@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.core.auth_context import owner_scope_user_id, require_user_id
 from app.dto.access_key import (
     AccessKeyCreateRequest,
     AccessKeyCreateResponse,
@@ -39,17 +40,24 @@ def _to_response(entity, *, plaintext: str | None = None):
 
 @router.get("", response_model=AccessKeyListResponse)
 async def list_access_keys(
+    request: Request,
     include_revoked: bool = Query(default=False),
 ) -> AccessKeyListResponse:
-    items = await access_key_service.list_keys(include_revoked=include_revoked)
+    items = await access_key_service.list_keys(
+        include_revoked=include_revoked,
+        owner_user_id=owner_scope_user_id(request),
+    )
     return AccessKeyListResponse(items=[_to_response(i) for i in items])
 
 
 @router.post("", response_model=AccessKeyCreateResponse)
-async def create_access_key(body: AccessKeyCreateRequest) -> AccessKeyCreateResponse:
+async def create_access_key(
+    body: AccessKeyCreateRequest, request: Request
+) -> AccessKeyCreateResponse:
+    owner_id = require_user_id(request)
     try:
         entity, plaintext = await access_key_service.create(
-            name=body.name, expires_at=body.expires_at
+            name=body.name, expires_at=body.expires_at, owner_user_id=owner_id
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -57,9 +65,10 @@ async def create_access_key(body: AccessKeyCreateRequest) -> AccessKeyCreateResp
 
 
 @router.delete("/{key_id}", response_model=AccessKeyResponse)
-async def revoke_access_key(key_id: int) -> AccessKeyResponse:
+async def revoke_access_key(key_id: int, request: Request) -> AccessKeyResponse:
+    owner_id = require_user_id(request)
     try:
-        entity = await access_key_service.revoke(key_id)
+        entity = await access_key_service.revoke(key_id, owner_user_id=owner_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _to_response(entity)
@@ -68,11 +77,17 @@ async def revoke_access_key(key_id: int) -> AccessKeyResponse:
 @router.get("/{key_id}/logs", response_model=ShareAccessLogListResponse)
 async def list_access_key_logs(
     key_id: int,
+    request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> ShareAccessLogListResponse:
     try:
-        logs = await access_key_service.list_logs(key_id, limit=limit, offset=offset)
+        logs = await access_key_service.list_logs(
+            key_id,
+            limit=limit,
+            offset=offset,
+            owner_user_id=owner_scope_user_id(request),
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ShareAccessLogListResponse(

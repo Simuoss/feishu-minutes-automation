@@ -12,6 +12,7 @@ from app.core.database import init_db
 from app.core.logging import setup_logging
 from app.integrations.feishu.ws_client import FeishuWsClientRunner
 from app.service.minute_subscription_service import ensure_minute_generated_subscription
+from app.service.stale_job_recovery import recover_stale_inflight_jobs
 
 _ws_runner: FeishuWsClientRunner | None = None
 
@@ -21,6 +22,8 @@ async def lifespan(_app: FastAPI):
     global _ws_runner
     setup_logging(debug=settings.app_debug)
     await init_db()
+    # 重启后内存池已空：超时仍卡在进行中的 DB 行标失败，避免永久「同步中/生成中」
+    await recover_stale_inflight_jobs()
     _ws_runner = FeishuWsClientRunner()
     _ws_runner.start()
     # 进程重启后补订阅：用户身份订阅不会随 WS 建连自动恢复

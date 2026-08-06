@@ -1,6 +1,8 @@
 if (!requireAdminPage()) throw new Error("redirecting to login");
 
-const LIST_CACHE_KEY = "minutes_list_cache_v1";
+function listCacheKey() {
+  return isSuperAdminView() ? "minutes_list_cache_super_v1" : "minutes_list_cache_v1";
+}
 const PAGE_SIZE_KEY = "minutes_page_size";
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 // 飞书 search 单次最多 30；进页/刷新时按这个粒度拉完整个时间窗
@@ -20,7 +22,7 @@ const state = {
   pageSize: loadPageSize(),
   filteredTotal: 0,
   downloadProgress: {},
-  progressTokens: new Set(),
+  progressItems: new Map(),
   progressBatchTimer: null,
   sortOrder: "desc",
   syncing: false,
@@ -54,8 +56,12 @@ function meetingLink(item) {
   return item.url || item.app_link || "";
 }
 
-function openMeeting(token) {
-  location.href = `/meeting.html?token=${encodeURIComponent(token)}`;
+function openMeeting(token, ownerId) {
+  let url = `/meeting.html?token=${encodeURIComponent(token)}`;
+  if (isSuperAdminView() && ownerId != null && ownerId !== "") {
+    url += `&owner_user_id=${encodeURIComponent(ownerId)}`;
+  }
+  location.href = url;
 }
 
 function itemProgressBlock(token) {
@@ -93,9 +99,20 @@ function setItemProgress(token, progress) {
   }
 }
 
+function progressItemKey(token, ownerId) {
+  return ownerId != null && ownerId !== "" ? `${ownerId}:${token}` : String(token);
+}
+
+function ownerUserIdFromItem(item) {
+  const raw = item?.owner_id ?? item?.owner_user_id;
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function pollDownloadProgressBatch() {
-  const tokens = [...state.progressTokens];
-  if (!tokens.length) {
+  const items = [...state.progressItems.values()];
+  if (!items.length) {
     if (state.progressBatchTimer) {
       clearInterval(state.progressBatchTimer);
       state.progressBatchTimer = null;
@@ -105,7 +122,7 @@ async function pollDownloadProgressBatch() {
   try {
     const res = await apiFetch("/meetings/download/progress/batch", {
       method: "POST",
-      body: JSON.stringify({ minute_tokens: tokens }),
+      body: JSON.stringify({ items }),
     });
     if (!res.ok) return;
     const data = await res.json();
@@ -117,16 +134,20 @@ async function pollDownloadProgressBatch() {
   }
 }
 
-function startProgressPolling(token) {
-  state.progressTokens.add(token);
+function startProgressPolling(token, ownerId) {
+  const key = progressItemKey(token, ownerId);
+  state.progressItems.set(key, {
+    minute_token: token,
+    owner_user_id: ownerId != null && ownerId !== "" ? Number(ownerId) : null,
+  });
   if (state.progressBatchTimer) return;
-  state.progressBatchTimer = setInterval(pollDownloadProgressBatch, 400);
+  state.progressBatchTimer = setInterval(pollDownloadProgressBatch, 1200);
   pollDownloadProgressBatch();
 }
 
-function stopProgressPolling(token) {
-  state.progressTokens.delete(token);
-  if (!state.progressTokens.size && state.progressBatchTimer) {
+function stopProgressPolling(token, ownerId) {
+  state.progressItems.delete(progressItemKey(token, ownerId));
+  if (!state.progressItems.size && state.progressBatchTimer) {
     clearInterval(state.progressBatchTimer);
     state.progressBatchTimer = null;
   }
@@ -137,14 +158,123 @@ function canViewLocal(item) {
 }
 
 function localBadge(item) {
-  if (item.is_local) return `<span class="badge badge-local">已本地</span>`;
+  if (item.is_local || item.local_status === "COMPLETED") {
+    return `<span class="badge badge-local">已同步</span>`;
+  }
   if (item.local_status === "DOWNLOADING") {
-    return `<span class="badge badge-pending">下载中</span>`;
+    return `<span class="badge badge-pending">同步中</span>`;
   }
   if (item.local_status === "FAILED") {
-    return `<span class="badge badge-failed">失败</span>`;
+    return `<span class="badge badge-failed">同步失败</span>`;
   }
-  return "";
+  return `<span class="badge">未同步</span>`;
+}
+
+function selectedStatusFilters() {
+  return [...document.querySelectorAll("#status-filter-tags .filter-tag.is-active")]
+    .map((el) => el.dataset.status)
+    .filter(Boolean);
+}
+
+function selectedOwnerFilters() {
+  return [...document.querySelectorAll("#owner-filter-tags .filter-tag.is-active")]
+    .map((el) => el.dataset.ownerId)
+    .filter(Boolean);
+}
+
+function itemMatchesOneStatus(item, filter) {
+  const local = item.local_status || "NONE";
+  const synced = Boolean(item.is_local || local === "COMPLETED");
+  const summary = normalizeSummaryStatus(item.summary_status);
+  switch (filter) {
+    case "UNSYNCED":
+      return !synced && local !== "DOWNLOADING";
+    case "SYNCING":
+      return local === "DOWNLOADING";
+    case "SYNCED":
+      return synced;
+    case "NO_SUMMARY":
+      return synced && summary !== "READY" && summary !== "GENERATING" && summary !== "QUEUED";
+    case "SUMMARY_GENERATING":
+      return summary === "GENERATING" || summary === "QUEUED";
+    case "HAS_SUMMARY":
+      return summary === "READY";
+    default:
+      return true;
+  }
+}
+
+function matchesStatusFilters(item, filters) {
+  if (!filters.length) return true;
+  return filters.some((filter) => itemMatchesOneStatus(item, filter));
+}
+
+function matchesOwnerFilters(item, ownerIds) {
+  if (!ownerIds.length) return true;
+  return ownerIds.includes(String(item.owner_id || ""));
+}
+
+function bindFilterTagClicks(container, onChange) {
+  if (!container || container.dataset.boundFilterTags) return;
+  container.dataset.boundFilterTags = "1";
+  container.addEventListener("click", (e) => {
+    const tag = e.target.closest(".filter-tag");
+    if (!tag || !container.contains(tag)) return;
+    tag.classList.toggle("is-active");
+    onChange();
+  });
+}
+
+async function loadOwnerFilterTags() {
+  const field = $("#owner-filter-field");
+  const box = $("#owner-filter-tags");
+  if (!field || !box) return;
+  if (!isSuperAdminView()) {
+    field.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  field.classList.remove("hidden");
+  const prev = new Set(selectedOwnerFilters());
+  const owners = new Map();
+
+  try {
+    const res = await apiFetch("/admin/users");
+    if (res.ok) {
+      const data = await res.json();
+      for (const user of data.items || []) {
+        if (user?.id == null) continue;
+        owners.set(String(user.id), user.username || `用户 ${user.id}`);
+      }
+    }
+  } catch {
+    /* 回退到列表内已有归属 */
+  }
+  for (const item of state.allItems) {
+    if (item.owner_id == null || item.owner_id === "") continue;
+    const id = String(item.owner_id);
+    if (!owners.has(id)) {
+      owners.set(id, item.owner_name || `用户 ${id}`);
+    }
+  }
+
+  const entries = [...owners.entries()].sort((a, b) =>
+    String(a[1]).localeCompare(String(b[1]), "zh")
+  );
+  if (!entries.length) {
+    box.innerHTML = `<span class="meeting-meta">暂无管理员</span>`;
+    return;
+  }
+  box.innerHTML = entries
+    .map(
+      ([id, name]) =>
+        `<button type="button" class="filter-tag${prev.has(id) ? " is-active" : ""}" data-owner-id="${escapeHtml(id)}">${escapeHtml(name)}</button>`
+    )
+    .join("");
+}
+
+function syncOwnerFilterOptions() {
+  return loadOwnerFilterTags();
 }
 
 function normalizeSummaryStatus(status) {
@@ -158,9 +288,8 @@ function summaryBadge(item) {
     case "READY":
       return `<span class="badge badge-summary">有纪要</span>`;
     case "GENERATING":
-      return `<span class="badge badge-pending">纪要生成中</span>`;
     case "QUEUED":
-      return `<span class="badge badge-pending">纪要排队中</span>`;
+      return `<span class="badge badge-pending">生成纪要中</span>`;
     case "FAILED":
       return `<span class="badge badge-failed">纪要失败</span>`;
     default:
@@ -180,15 +309,23 @@ async function refreshSummaryBadges() {
     const res = await apiFetch("/meetings/summary/progress/batch", {
       method: "POST",
       body: JSON.stringify({
-        minute_tokens: inflight.map((item) => item.minute_token),
+        items: inflight.map((item) => ({
+          minute_token: item.minute_token,
+          owner_user_id: ownerUserIdFromItem(item),
+        })),
       }),
     });
     if (!res.ok) return;
     const data = await res.json();
-    const byToken = new Map((data.items || []).map((row) => [row.minute_token, row]));
+    const byKey = new Map(
+      (data.items || []).map((row) => [
+        progressItemKey(row.minute_token, row.owner_user_id),
+        row,
+      ])
+    );
     let changed = false;
     for (const item of inflight) {
-      const row = byToken.get(item.minute_token);
+      const row = byKey.get(progressItemKey(item.minute_token, ownerUserIdFromItem(item)));
       if (!row) continue;
       const next = normalizeSummaryStatus(row.status || item.summary_status);
       if (next !== normalizeSummaryStatus(item.summary_status)) {
@@ -247,6 +384,8 @@ function filterAndSortAllItems() {
   const maxDur = $("#max-duration").value.trim();
   const minMs = minDur === "" ? null : Number(minDur) * 60_000;
   const maxMs = maxDur === "" ? null : Number(maxDur) * 60_000;
+  const statusFilters = selectedStatusFilters();
+  const ownerFilters = selectedOwnerFilters();
 
   let rows = state.allItems.filter((item) => {
     if (keyword) {
@@ -264,6 +403,8 @@ function filterAndSortAllItems() {
         .toLowerCase();
       if (!hay.includes(keyword)) return false;
     }
+    if (!matchesStatusFilters(item, statusFilters)) return false;
+    if (!matchesOwnerFilters(item, ownerFilters)) return false;
     const created = parseMeetingTime(item.create_time);
     if (start != null && !Number.isNaN(start) && created != null && created < start) return false;
     if (end != null && !Number.isNaN(end) && created != null && created > end) return false;
@@ -297,9 +438,13 @@ function applyLocalView({ resetPage = false } = {}) {
   updatePager(pageCount);
   const sortLabel = state.sortOrder === "asc" ? "正序（旧→新）" : "倒序（新→旧）";
   const syncHint = state.syncing
-    ? " · 正在同步云端…"
+    ? isSuperAdminView()
+      ? " · 正在加载全站…"
+      : " · 正在同步云端…"
     : state.lastSyncedAt
-      ? ` · 云端 ${describeCacheAge(state.lastSyncedAt)}`
+      ? isSuperAdminView()
+        ? ` · 全站 ${describeCacheAge(state.lastSyncedAt)}`
+        : ` · 云端 ${describeCacheAge(state.lastSyncedAt)}`
       : "";
   setStatus(
     `共 ${filtered.length} 条 · 第 ${filtered.length ? state.pageIndex + 1 : 0}/${filtered.length ? pageCount : 0} 页 · ${sortLabel}${syncHint}`
@@ -338,15 +483,19 @@ function renderList() {
     const extra = meetingExtraLine(item);
     const link = meetingLink(item);
     const meta = meetingMetaParts(item).join(" · ");
+    const ownerAttr =
+      item.owner_id != null && item.owner_id !== ""
+        ? ` data-owner="${escapeHtml(String(item.owner_id))}"`
+        : "";
     const viewBtn = canOpen
-      ? `<button type="button" class="btn btn-sm btn-view" data-view="${item.minute_token}">${btnContent("eye-line", "本地查看")}</button>`
+      ? `<button type="button" class="btn btn-sm btn-view" data-view="${item.minute_token}"${ownerAttr}>${btnContent("eye-line", "查看")}</button>`
       : "";
 
     li.innerHTML = `
       <input type="checkbox" data-token="${item.minute_token}" ${state.selected.has(item.minute_token) ? "checked" : ""} />
       <div class="meeting-body">
         <div class="meeting-title-row">
-          <p class="${titleClass}" data-token="${item.minute_token}" data-open="${canOpen}">${escapeHtml(title)}${localBadge(item)}${summaryBadge(item)}</p>
+          <p class="${titleClass}" data-token="${item.minute_token}" data-open="${canOpen}"${ownerAttr}>${escapeHtml(title)}${localBadge(item)}${summaryBadge(item)}</p>
           ${viewBtn}
         </div>
         <p class="meeting-meta">${escapeHtml(meta)}</p>
@@ -368,13 +517,13 @@ function renderList() {
   });
 
   list.querySelectorAll(".meeting-title.clickable").forEach((el) => {
-    el.addEventListener("click", () => openMeeting(el.dataset.token));
+    el.addEventListener("click", () => openMeeting(el.dataset.token, el.dataset.owner));
   });
 
   list.querySelectorAll(".btn-view").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      openMeeting(btn.dataset.view);
+      openMeeting(btn.dataset.view, btn.dataset.owner);
     });
   });
 }
@@ -474,7 +623,7 @@ function showMissingScopeWarning(missingScopes) {
 function saveListCache(items) {
   try {
     localStorage.setItem(
-      LIST_CACHE_KEY,
+      listCacheKey(),
       JSON.stringify({ saved_at: Date.now(), items })
     );
   } catch {
@@ -485,9 +634,9 @@ function saveListCache(items) {
 function loadListCache() {
   let cached;
   try {
-    cached = JSON.parse(localStorage.getItem(LIST_CACHE_KEY) || "null");
+    cached = JSON.parse(localStorage.getItem(listCacheKey()) || "null");
   } catch {
-    localStorage.removeItem(LIST_CACHE_KEY);
+    localStorage.removeItem(listCacheKey());
     return null;
   }
   if (!cached?.items?.length) return null;
@@ -520,6 +669,7 @@ function showCachedListFirst() {
   if (!cached) return;
   state.allItems = cached.items;
   state.lastSyncedAt = cached.saved_at || null;
+  syncOwnerFilterOptions();
   applyLocalView({ resetPage: true });
   setStatus("Thinking...", { thinking: true });
 }
@@ -542,6 +692,21 @@ async function fetchCloudPage(pageToken) {
   return res.json();
 }
 
+async function fetchStoredList() {
+  const res = await apiFetch("/meetings/stored?limit=2000");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const detail =
+      typeof err.detail === "string"
+        ? err.detail
+        : res.status === 404
+          ? "全站列表接口不存在，请重启后端后再试"
+          : res.statusText || "加载失败";
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 async function refreshFromCloud() {
   if (state.syncing) return;
   state.syncing = true;
@@ -553,37 +718,49 @@ async function refreshFromCloud() {
     setStatus("Thinking...", { thinking: true });
   }
   try {
-    const byToken = new Map();
-    let pageToken = null;
-    let guard = 0;
-    do {
-      const data = await fetchCloudPage(pageToken);
-      const batch = data.items || [];
-      let added = 0;
-      for (const item of batch) {
-        if (!item?.minute_token || byToken.has(item.minute_token)) continue;
-        byToken.set(item.minute_token, item);
-        added += 1;
-      }
-      // 飞书偶发 has_more=true 却不再给出新会议时立刻停，避免空转
-      pageToken = data.has_more && added > 0 ? data.page_token : null;
-      guard += 1;
-      if (byToken.size > 0 && !state.allItems.length) {
-        setStatus(`Thinking... · ${byToken.size}`);
-      } else {
-        setStatus("Thinking...", { thinking: true });
-      }
-    } while (pageToken && guard < 200);
+    let collected;
+    if (isSuperAdminView()) {
+      // 超管无个人飞书身份：展示全站已入库会议
+      const data = await fetchStoredList();
+      collected = data.items || [];
+    } else {
+      const byToken = new Map();
+      let pageToken = null;
+      let guard = 0;
+      do {
+        const data = await fetchCloudPage(pageToken);
+        const batch = data.items || [];
+        let added = 0;
+        for (const item of batch) {
+          if (!item?.minute_token || byToken.has(item.minute_token)) continue;
+          byToken.set(item.minute_token, item);
+          added += 1;
+        }
+        // 飞书偶发 has_more=true 却不再给出新会议时立刻停，避免空转
+        pageToken = data.has_more && added > 0 ? data.page_token : null;
+        guard += 1;
+        if (byToken.size > 0 && !state.allItems.length) {
+          setStatus(`Thinking... · ${byToken.size}`);
+        } else {
+          setStatus("Thinking...", { thinking: true });
+        }
+      } while (pageToken && guard < 200);
+      collected = [...byToken.values()];
+    }
 
-    const collected = [...byToken.values()];
     state.allItems = mergeByMinuteToken(collected, state.allItems);
     state.lastSyncedAt = Date.now();
     saveListCache(state.allItems);
+    syncOwnerFilterOptions();
     applyLocalView({ resetPage: true });
   } catch (e) {
     if (state.allItems.length) {
       applyLocalView();
-      setStatus(`云端同步失败：${e.message}（下方仍是本地数据）`);
+      setStatus(
+        isSuperAdminView()
+          ? `全站列表加载失败：${e.message}（下方仍是缓存）`
+          : `云端同步失败：${e.message}（下方仍是本地数据）`
+      );
       return;
     }
     setStatus(`加载失败：${e.message}`);
@@ -642,7 +819,12 @@ async function runBatchDownload({
   $("#batch-summary-btn").disabled = true;
   $("#share-selected-btn").disabled = true;
 
-  tokens.forEach((token) => {
+  const jobs = tokens.map((token) => {
+    const row = state.allItems.find((item) => item.minute_token === token);
+    return { token, ownerId: ownerUserIdFromItem(row) };
+  });
+
+  jobs.forEach(({ token }) => {
     setItemProgress(token, { percent: 0, stage: "排队中", status: "pending" });
   });
 
@@ -651,25 +833,42 @@ async function runBatchDownload({
   let completed = 0;
   let cursor = 0;
 
-  const runOne = async (token) => {
+  const markCompleted = (token) => {
+    setItemProgress(token, { percent: 100, stage: "下载完成", status: "completed" });
+    const row = state.allItems.find((item) => item.minute_token === token);
+    if (row) {
+      row.is_local = true;
+      row.local_status = "COMPLETED";
+    }
+    completed += 1;
+  };
+
+  const waitUntilDownloadSettled = async (token) => {
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const progress = state.downloadProgress[token];
+      if (progress && (progress.status === "completed" || progress.status === "failed")) {
+        return progress;
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    return state.downloadProgress[token] || { status: "failed", stage: "下载超时" };
+  };
+
+  const runOne = async ({ token, ownerId }) => {
     setItemProgress(token, { percent: 0, stage: "准备下载", status: "downloading" });
-    startProgressPolling(token);
+    startProgressPolling(token, ownerId);
     try {
       const result = await downloadOne(token, {
         skip_if_completed: true,
         redownload_media,
         redownload_transcript,
       });
-      stopProgressPolling(token);
       if (result.status === "COMPLETED") {
-        setItemProgress(token, { percent: 100, stage: "下载完成", status: "completed" });
-        const row = state.allItems.find((item) => item.minute_token === token);
-        if (row) {
-          row.is_local = true;
-          row.local_status = "COMPLETED";
-        }
-        completed += 1;
+        stopProgressPolling(token, ownerId);
+        markCompleted(token);
       } else if (result.status === "FAILED") {
+        stopProgressPolling(token, ownerId);
         setItemProgress(token, {
           percent: state.downloadProgress[token]?.percent ?? 0,
           stage: "下载失败",
@@ -677,14 +876,34 @@ async function runBatchDownload({
         });
         failed.push(result);
         if (!scopeShown && showScopeError(result)) scopeShown = true;
+      } else {
+        // DOWNLOADING：依赖 progress batch 轮询直到终态
+        const progress = await waitUntilDownloadSettled(token);
+        stopProgressPolling(token, ownerId);
+        if (progress.status === "completed") {
+          markCompleted(token);
+        } else {
+          setItemProgress(token, {
+            percent: progress.percent ?? 0,
+            stage: progress.stage || "下载失败",
+            status: "failed",
+          });
+          const fail = {
+            minute_token: token,
+            status: "FAILED",
+            error_message: progress.error_message || progress.stage || "下载失败",
+          };
+          failed.push(fail);
+          if (!scopeShown && showScopeError(fail)) scopeShown = true;
+        }
       }
     } catch (e) {
-      stopProgressPolling(token);
+      stopProgressPolling(token, ownerId);
       setItemProgress(token, { percent: 0, stage: "下载失败", status: "failed" });
       failed.push({ minute_token: token, status: "FAILED", error_message: e.message });
     } finally {
       setStatus(
-        `下载中 ${completed + failed.length}/${tokens.length}` +
+        `下载中 ${completed + failed.length}/${jobs.length}` +
           (failed.length ? `，失败 ${failed.length}` : "")
       );
     }
@@ -693,12 +912,12 @@ async function runBatchDownload({
   try {
     setStatus(`开始下载（并发 ${DOWNLOAD_CONCURRENCY}）…`);
     const workers = Array.from(
-      { length: Math.min(DOWNLOAD_CONCURRENCY, tokens.length) },
+      { length: Math.min(DOWNLOAD_CONCURRENCY, jobs.length) },
       async () => {
-        while (cursor < tokens.length) {
+        while (cursor < jobs.length) {
           const index = cursor;
           cursor += 1;
-          await runOne(tokens[index]);
+          await runOne(jobs[index]);
         }
       }
     );
@@ -718,7 +937,7 @@ async function runBatchDownload({
   } catch (e) {
     setStatus(`下载失败：${e.message}`);
   } finally {
-    tokens.forEach(stopProgressPolling);
+    jobs.forEach(({ token, ownerId }) => stopProgressPolling(token, ownerId));
     updateDownloadBtn();
     $("#select-all-btn").disabled = false;
   }
@@ -1039,7 +1258,7 @@ async function confirmShareSelected() {
 $("#search-btn").addEventListener("click", () => applyLocalView({ resetPage: true }));
 $("#refresh-btn").addEventListener("click", () => {
   if (state.syncing) {
-    setStatus("正在同步云端，请稍候…");
+    setStatus(isSuperAdminView() ? "正在加载全站，请稍候…" : "正在同步云端，请稍候…");
     return;
   }
   refreshFromCloud();
@@ -1047,6 +1266,11 @@ $("#refresh-btn").addEventListener("click", () => {
 $("#search-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") applyLocalView({ resetPage: true });
 });
+bindFilterTagClicks($("#status-filter-tags"), () => applyLocalView({ resetPage: true }));
+bindFilterTagClicks($("#owner-filter-tags"), () => applyLocalView({ resetPage: true }));
+if (isSuperAdminView()) {
+  loadOwnerFilterTags();
+}
 $("#select-all-btn").addEventListener("click", selectAllVisible);
 $("#download-btn").addEventListener("click", downloadSelected);
 $("#batch-summary-btn").addEventListener("click", batchGenerateSummaries);

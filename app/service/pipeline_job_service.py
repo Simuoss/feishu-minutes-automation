@@ -24,6 +24,7 @@ async def start_job(
     minute_token: str,
     *,
     job_type: str,
+    owner_user_id: int,
     mode: str | None = None,
     stage: str | None = None,
     attempt: int | None = None,
@@ -34,6 +35,7 @@ async def start_job(
         assert uow.pipeline_jobs is not None
         entity = await uow.pipeline_jobs.create(
             PipelineJobCreateEntity(
+                owner_user_id=owner_user_id,
                 minute_token=minute_token,
                 job_type=job_type.upper(),
                 mode=(mode or "").upper() or None,
@@ -49,7 +51,9 @@ async def start_job(
         await uow.commit()
         job_id = entity.id
     if job_type.upper() == "SUMMARY":
-        await set_summary_status(minute_token, "GENERATING")
+        await set_summary_status(
+            minute_token, "GENERATING", owner_user_id=owner_user_id
+        )
     return job_id
 
 
@@ -85,11 +89,18 @@ def schedule_start_job(
     minute_token: str,
     *,
     job_type: str,
+    owner_user_id: int,
     mode: str | None = None,
     stage: str | None = None,
 ) -> None:
     schedule_async(
-        start_job(minute_token, job_type=job_type, mode=mode, stage=stage),
+        start_job(
+            minute_token,
+            job_type=job_type,
+            owner_user_id=owner_user_id,
+            mode=mode,
+            stage=stage,
+        ),
         what="pipeline_job_start",
     )
 

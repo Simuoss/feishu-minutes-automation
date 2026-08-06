@@ -4,6 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class PipelineJobEntity:
     id: int | None
+    owner_user_id: int
     minute_token: str
     job_type: str
     mode: str | None
@@ -20,6 +21,7 @@ class PipelineJobEntity:
 
 @dataclass
 class PipelineJobCreateEntity:
+    owner_user_id: int
     minute_token: str
     job_type: str
     mode: str | None = None

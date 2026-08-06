@@ -63,6 +63,8 @@ class AccessKeyRepository:
         stmt = select(AccessKeyORM).order_by(AccessKeyORM.id.desc())
         if query.id is not None:
             stmt = stmt.where(AccessKeyORM.id == query.id)
+        if query.owner_user_id is not None:
+            stmt = stmt.where(AccessKeyORM.owner_user_id == query.owner_user_id)
         if not query.include_revoked:
             stmt = stmt.where(AccessKeyORM.revoked_at.is_(None))
         result = await self._session.execute(stmt)

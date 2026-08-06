@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,11 +97,15 @@ class MeetingRecordRepository:
     async def upsert_by_minute_token(
         self, entity: MeetingRecordCreateEntity
     ) -> MeetingRecordEntity:
-        """按 minute_token 合并会议主档；无 feishu_event_id 冲突时用于文件回填。"""
+        """按 (owner, minute_token) 合并会议主档；无 feishu_event_id 冲突时用于文件回填。"""
         token = (entity.minute_token or "").strip()
         if not token:
             return await self.create(entity)
-        existing = await self.get_latest_by_minute_token(token)
+        if entity.owner_user_id is None:
+            raise ValueError("upsert_by_minute_token 需要 owner_user_id")
+        existing = await self.get_latest_by_minute_token(
+            token, owner_user_id=int(entity.owner_user_id)
+        )
         if existing is None or existing.id is None:
             return await self.create(entity)
         updated = await self.update(
@@ -135,11 +141,14 @@ class MeetingRecordRepository:
         return _to_entity(orm) if orm else None
 
     async def get_latest_by_minute_token(
-        self, minute_token: str
+        self, minute_token: str, *, owner_user_id: int
     ) -> MeetingRecordEntity | None:
         stmt = (
             select(MeetingRecordORM)
-            .where(MeetingRecordORM.minute_token == minute_token)
+            .where(
+                MeetingRecordORM.minute_token == minute_token,
+                MeetingRecordORM.owner_user_id == int(owner_user_id),
+            )
             .order_by(MeetingRecordORM.id.desc())
             .limit(1)
         )
@@ -148,7 +157,10 @@ class MeetingRecordRepository:
         return _to_entity(orm) if orm else None
 
     async def map_latest_by_minute_tokens(
-        self, minute_tokens: list[str]
+        self,
+        minute_tokens: list[str],
+        *,
+        owner_user_id: int | None = None,
     ) -> dict[str, MeetingRecordEntity]:
         if not minute_tokens:
             return {}
@@ -157,6 +169,8 @@ class MeetingRecordRepository:
             .where(MeetingRecordORM.minute_token.in_(minute_tokens))
             .order_by(MeetingRecordORM.id.desc())
         )
+        if owner_user_id is not None:
+            stmt = stmt.where(MeetingRecordORM.owner_user_id == owner_user_id)
         result = await self._session.execute(stmt)
         mapping: dict[str, MeetingRecordEntity] = {}
         for orm in result.scalars().all():
@@ -182,3 +196,75 @@ class MeetingRecordRepository:
             stmt = stmt.where(MeetingRecordORM.owner_user_id == query.owner_user_id)
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]
+
+    async def list_latest_by_scope(
+        self,
+        *,
+        owner_user_id: int | None = None,
+        limit: int = 500,
+    ) -> list[MeetingRecordEntity]:
+        """取每个资源最新一条。
+
+        - 普通 scope：同一 owner 下按 minute_token 去重
+        - 超管全站（owner_user_id is None）：按 (owner_user_id, minute_token) 去重
+        """
+        stmt = (
+            select(MeetingRecordORM)
+            .where(MeetingRecordORM.minute_token.is_not(None))
+            .order_by(MeetingRecordORM.id.desc())
+        )
+        if owner_user_id is not None:
+            stmt = stmt.where(MeetingRecordORM.owner_user_id == owner_user_id)
+        result = await self._session.execute(stmt)
+        latest: dict[tuple[int | None, str], MeetingRecordEntity] = {}
+        for orm in result.scalars().all():
+            token = orm.minute_token
+            if not token:
+                continue
+            # 超管全站必须保留不同 owner 的同 token；用户 scope 已按 owner 过滤
+            key = (
+                (orm.owner_user_id, token)
+                if owner_user_id is None
+                else (None, token)
+            )
+            if key in latest:
+                continue
+            latest[key] = _to_entity(orm)
+            if len(latest) >= max(1, limit):
+                break
+        return list(latest.values())
+
+    async def fail_stale_inflight(
+        self,
+        *,
+        cutoff: datetime,
+        download_error: str,
+        summary_error: str,
+    ) -> tuple[list[MeetingRecordEntity], list[MeetingRecordEntity]]:
+        """将超时仍为 DOWNLOADING / summary GENERATING 的记录标为 FAILED。"""
+        download_stmt = select(MeetingRecordORM).where(
+            MeetingRecordORM.status == "DOWNLOADING",
+            MeetingRecordORM.updated_at < cutoff,
+        )
+        download_result = await self._session.execute(download_stmt)
+        download_failed: list[MeetingRecordEntity] = []
+        for orm in download_result.scalars().all():
+            orm.status = "FAILED"
+            orm.error_message = download_error
+            download_failed.append(_to_entity(orm))
+
+        summary_stmt = select(MeetingRecordORM).where(
+            MeetingRecordORM.summary_status == "GENERATING",
+            MeetingRecordORM.updated_at < cutoff,
+        )
+        summary_result = await self._session.execute(summary_stmt)
+        summary_failed: list[MeetingRecordEntity] = []
+        for orm in summary_result.scalars().all():
+            orm.summary_status = "FAILED"
+            if not orm.error_message:
+                orm.error_message = summary_error
+            summary_failed.append(_to_entity(orm))
+
+        if download_failed or summary_failed:
+            await self._session.flush()
+        return download_failed, summary_failed

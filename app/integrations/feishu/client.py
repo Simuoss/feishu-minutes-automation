@@ -57,9 +57,24 @@ class FeishuApiClient:
         self,
         auth: FeishuAuthClient | None = None,
         user_auth: FeishuUserAuthClient | None = None,
+        *,
+        user_id: int | None = None,
     ) -> None:
         self._auth = auth or FeishuAuthClient()
-        self._user_auth = user_auth or FeishuUserAuthClient()
+        if user_auth is not None:
+            self._user_auth = user_auth
+        elif user_id is not None:
+            self._user_auth = FeishuUserAuthClient(user_id=user_id)
+        else:
+            self._user_auth = None
+
+    def _require_user_auth(self) -> FeishuUserAuthClient:
+        if self._user_auth is None:
+            raise RuntimeError(
+                "FeishuApiClient 未绑定 user_id，无法使用 user_access_token；"
+                "请在构造时传入 user_id"
+            )
+        return self._user_auth
 
     async def request(
         self,
@@ -101,7 +116,9 @@ class FeishuApiClient:
     ) -> Any:
         for attempt in range(2):
             if user_token:
-                token = await self._user_auth.get_user_access_token(force_refresh=attempt > 0)
+                token = await self._require_user_auth().get_user_access_token(
+                    force_refresh=attempt > 0
+                )
             else:
                 token = await self._auth.get_tenant_access_token()
 

@@ -14,14 +14,17 @@ T = TypeVar("T")
 
 
 def run_async(coro: Coroutine[Any, Any, T]) -> T:
+    """在同步代码中跑协程；若已在事件循环内则开线程跑独立 loop。"""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
 
-    # 已在事件循环内：开线程跑独立 loop，避免嵌套 await
+    def _runner() -> T:
+        return asyncio.run(coro)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+        return pool.submit(_runner).result()
 
 
 def schedule_async(coro: Coroutine[Any, Any, Any], *, what: str) -> None:

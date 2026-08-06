@@ -5,6 +5,7 @@ from typing import Any
 @dataclass
 class SummaryRunEntity:
     id: int | None
+    owner_user_id: int
     minute_token: str
     model: str | None
     input_tokens: int | None
@@ -36,6 +37,7 @@ class SummaryRunEntity:
 
 @dataclass
 class SummaryRunUpsertEntity:
+    owner_user_id: int
     minute_token: str
     model: str | None = None
     input_tokens: int | None = None

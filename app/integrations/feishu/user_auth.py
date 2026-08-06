@@ -45,10 +45,48 @@ class UserAuthRequiredError(RuntimeError):
 
 
 class FeishuUserAuthClient:
-    """飞书用户 OAuth 与 user_access_token 管理。"""
+    """绑定到具体 user_id 的飞书用户 OAuth / Token 客户端。"""
 
-    def __init__(self, store: FeishuUserTokenStore | None = None) -> None:
+    def __init__(
+        self,
+        user_id: int,
+        store: FeishuUserTokenStore | None = None,
+    ) -> None:
+        if user_id is None:
+            raise ValueError("FeishuUserAuthClient 必须绑定 user_id")
+        self._user_id = int(user_id)
         self._store = store or FeishuUserTokenStore()
+        # 进程内短缓存：避免 async 请求里反复 run_async 开线程读 DB
+        self._mem_access_token: str | None = None
+        self._mem_expires_at: float = 0.0
+        self._mem_scope: str | None = None
+        self._mem_refresh_token: str | None = None
+        self._mem_loaded: bool = False
+
+    @property
+    def user_id(self) -> int:
+        return self._user_id
+
+    def _cache_from_stored(self, stored: dict[str, Any] | None) -> None:
+        self._mem_loaded = True
+        if not stored:
+            self._mem_access_token = None
+            self._mem_expires_at = 0.0
+            self._mem_scope = None
+            self._mem_refresh_token = None
+            return
+        self._mem_access_token = stored.get("access_token")
+        try:
+            self._mem_expires_at = float(stored.get("expires_at") or 0)
+        except (TypeError, ValueError):
+            self._mem_expires_at = 0.0
+        self._mem_scope = stored.get("scope")
+        self._mem_refresh_token = stored.get("refresh_token")
+
+    async def _load_stored(self) -> dict[str, Any] | None:
+        stored = await self._store.load_async(self._user_id)
+        self._cache_from_stored(stored)
+        return stored
 
     def build_authorize_url(
         self,
@@ -69,7 +107,8 @@ class FeishuUserAuthClient:
         return f"{settings.feishu_oauth_authorize_url}?{urlencode(params)}"
 
     def clear_authorization(self) -> None:
-        self._store.clear()
+        self._store.clear(self._user_id)
+        self._cache_from_stored(None)
 
     async def exchange_code(
         self, code: str, *, redirect_uri: str | None = None
@@ -79,7 +118,6 @@ class FeishuUserAuthClient:
             "client_id": settings.feishu_app_id,
             "client_secret": settings.feishu_app_secret,
             "code": code,
-            # 必须与发起授权时的 redirect_uri 完全一致
             "redirect_uri": redirect_uri or settings.feishu_oauth_redirect_uri,
         }
         data = await self._post_token(body)
@@ -87,7 +125,7 @@ class FeishuUserAuthClient:
         return data
 
     async def refresh_access_token(self) -> dict[str, Any]:
-        stored = self._store.load()
+        stored = await self._load_stored()
         if not stored or not stored.get("refresh_token"):
             raise UserAuthRequiredError("缺少 refresh_token，请重新登录飞书授权")
         body = {
@@ -103,8 +141,18 @@ class FeishuUserAuthClient:
     async def get_user_access_token(self, *, force_refresh: bool = False) -> str:
         if force_refresh:
             await self.refresh_access_token()
+            if self._mem_access_token:
+                return self._mem_access_token
 
-        stored = self._store.load()
+        now = datetime.now(timezone.utc).timestamp()
+        if (
+            self._mem_access_token
+            and self._mem_expires_at
+            and now < self._mem_expires_at - 60
+        ):
+            return self._mem_access_token
+
+        stored = await self._load_stored()
         if not stored:
             raise UserAuthRequiredError(
                 "尚未完成飞书用户授权。搜索妙记列表必须使用 user_access_token，"
@@ -112,7 +160,6 @@ class FeishuUserAuthClient:
             )
 
         expires_at = stored.get("expires_at")
-        now = datetime.now(timezone.utc).timestamp()
         token = stored.get("access_token")
         if token and expires_at and now < float(expires_at) - 60:
             return token
@@ -129,10 +176,40 @@ class FeishuUserAuthClient:
         raise UserAuthRequiredError("user_access_token 已失效，请重新登录飞书授权")
 
     def is_authorized(self) -> bool:
-        return self._store.is_authorized()
+        return self._store.is_authorized(self._user_id)
+
+    async def auth_status_async(self) -> tuple[bool, list[str], list[str]]:
+        """一次异步读库，供 /auth/feishu/status，避免多次 run_async。"""
+        stored = await self._load_stored()
+        if not stored:
+            return False, [], []
+        expires_at = stored.get("expires_at")
+        now = datetime.now(timezone.utc).timestamp()
+        has_access = bool(stored.get("access_token")) and (
+            not expires_at or now < float(expires_at) - 60
+        )
+        authorized = has_access or bool(stored.get("refresh_token") or stored.get("access_token"))
+        if not authorized:
+            return False, [], []
+        if stored.get("scope"):
+            granted = parse_scope_string(stored["scope"])
+        else:
+            granted = parse_scope_string(decode_jwt_scope(stored.get("access_token")))
+        configured = parse_scope_string(settings.feishu_oauth_scopes)
+        missing = sorted(
+            scope
+            for scope in configured
+            if scope not in granted and scope != "offline_access"
+        )
+        return True, sorted(granted), missing
 
     def get_granted_scopes(self) -> set[str]:
-        stored = self._store.load()
+        if self._mem_loaded:
+            if self._mem_scope:
+                return parse_scope_string(self._mem_scope)
+            return parse_scope_string(decode_jwt_scope(self._mem_access_token))
+        stored = self._store.load(self._user_id)
+        self._cache_from_stored(stored)
         if not stored:
             return set()
         if stored.get("scope"):
@@ -142,7 +219,11 @@ class FeishuUserAuthClient:
     def get_missing_scopes(self) -> list[str]:
         configured = parse_scope_string(settings.feishu_oauth_scopes)
         granted = self.get_granted_scopes()
-        return sorted(scope for scope in configured if scope not in granted and scope != "offline_access")
+        return sorted(
+            scope
+            for scope in configured
+            if scope not in granted and scope != "offline_access"
+        )
 
     async def _post_token(self, body: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -162,11 +243,16 @@ class FeishuUserAuthClient:
                 raise RuntimeError(f"OAuth 响应异常 (HTTP {response.status_code})") from exc
 
         if payload.get("code") != 0:
-            detail = payload.get("error_description") or payload.get("msg") or payload.get("error")
+            detail = (
+                payload.get("error_description")
+                or payload.get("msg")
+                or payload.get("error")
+            )
             logger.error(
-                "换取 user_access_token 失败 code=%s detail=%s，怀疑 OAuth 配置或授权码无效",
+                "换取 user_access_token 失败 code=%s detail=%s user_id=%s",
                 payload.get("code"),
                 detail,
+                self._user_id,
             )
             raise RuntimeError(f"OAuth 失败 [{payload.get('code')}]: {detail}")
 
@@ -176,7 +262,9 @@ class FeishuUserAuthClient:
 
     def _persist_token_response(self, data: dict[str, Any]) -> None:
         expires_in = int(data.get("expires_in", 7200))
-        refresh_expires_in = data.get("refresh_token_expires_in") or data.get("refresh_expires_in")
+        refresh_expires_in = data.get("refresh_token_expires_in") or data.get(
+            "refresh_expires_in"
+        )
         now = time.time()
         scope = data.get("scope") or decode_jwt_scope(data.get("access_token"))
         record = {
@@ -184,7 +272,10 @@ class FeishuUserAuthClient:
             "refresh_token": data.get("refresh_token"),
             "scope": scope,
             "expires_at": now + expires_in,
-            "refresh_expires_at": now + int(refresh_expires_in) if refresh_expires_in else None,
+            "refresh_expires_at": now + int(refresh_expires_in)
+            if refresh_expires_in
+            else None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._store.save(record)
+        self._store.save(self._user_id, record)
+        self._cache_from_stored(record)

@@ -56,14 +56,20 @@ class DownloadMeetingsResponse(BaseModel):
 
 class DownloadProgressResponse(BaseModel):
     minute_token: str
+    owner_user_id: int | None = None
     percent: int
     stage: str
     status: str
     error_message: str | None = None
 
 
+class ProgressBatchItem(BaseModel):
+    minute_token: str
+    owner_user_id: int | None = None
+
+
 class DownloadProgressBatchRequest(BaseModel):
-    minute_tokens: list[str] = Field(min_length=1, max_length=100)
+    items: list[ProgressBatchItem] = Field(min_length=1, max_length=100)
 
 
 class DownloadProgressBatchResponse(BaseModel):
@@ -82,5 +88,10 @@ class LocalMeetingDetailResponse(BaseModel):
     duration_ms: int | None = None
     has_video: bool | None = None
     media_files: list[LocalMediaFileResponse] = []
-    transcript: str | None = None
+    has_transcript: bool = False
     downloaded_at: str | None = None
+
+
+class LocalTranscriptResponse(BaseModel):
+    minute_token: str
+    transcript: str

@@ -5,6 +5,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from app.core.admin_auth import resolve_request_principal
+from app.core.auth_context import require_user_id
 from app.core.request_urls import (
     decode_oauth_state,
     encode_oauth_state,
@@ -12,15 +14,12 @@ from app.core.request_urls import (
     oauth_redirect_allowlist,
     resolve_oauth_redirect_uri,
 )
-from app.integrations.feishu.user_auth import (
-    FeishuUserAuthClient,
-)
+from app.integrations.feishu.user_auth import FeishuUserAuthClient
 from app.service.minute_subscription_service import ensure_minute_generated_subscription
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/feishu", tags=["auth"])
-_user_auth = FeishuUserAuthClient()
 
 
 class AuthStatusResponse(BaseModel):
@@ -33,11 +32,10 @@ class AuthStatusResponse(BaseModel):
 
 
 @router.get("/status", response_model=AuthStatusResponse)
-async def auth_status() -> AuthStatusResponse:
-    # 相对路径：浏览器按当前页面 origin 发起授权，从而动态选本地或公网回调
-    authorized = _user_auth.is_authorized()
-    granted = sorted(_user_auth.get_granted_scopes()) if authorized else []
-    missing = _user_auth.get_missing_scopes() if authorized else []
+async def auth_status(request: Request) -> AuthStatusResponse:
+    user_id = require_user_id(request)
+    user_auth = FeishuUserAuthClient(user_id=user_id)
+    authorized, granted, missing = await user_auth.auth_status_async()
     return AuthStatusResponse(
         authorized=authorized,
         login_url="/api/v1/auth/feishu/login",
@@ -52,25 +50,37 @@ async def auth_status() -> AuthStatusResponse:
 async def login(
     request: Request, reauth: bool = Query(default=False)
 ) -> RedirectResponse:
-    if reauth:
-        _user_auth.clear_authorization()
+    principal = resolve_request_principal(request)
+    if principal is None or not principal.is_user or principal.user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="请先登录本系统账号，再绑定你自己的飞书授权（禁止把授权绑到其他账号）",
+        )
+    oauth_user_id = principal.user_id
+    user_auth = FeishuUserAuthClient(user_id=oauth_user_id)
+
     redirect_uri = resolve_oauth_redirect_uri(request)
     frontend_origin = frontend_origin_for_redirect_uri(redirect_uri)
+
+    if reauth:
+        user_auth.clear_authorization()
     state = encode_oauth_state(
         redirect_uri=redirect_uri,
         frontend_origin=frontend_origin,
         reauth=reauth,
+        user_id=oauth_user_id,
     )
-    url = _user_auth.build_authorize_url(
+    url = user_auth.build_authorize_url(
         state=state,
         redirect_uri=redirect_uri,
         force_consent=reauth,
     )
     logger.info(
-        "发起飞书 OAuth：redirect_uri=%s frontend=%s reauth=%s",
+        "发起飞书 OAuth：redirect_uri=%s frontend=%s reauth=%s user_id=%s",
         redirect_uri,
         frontend_origin,
         reauth,
+        oauth_user_id,
     )
     return RedirectResponse(url)
 
@@ -94,16 +104,31 @@ async def callback(
     if not frontend_origin:
         frontend_origin = frontend_origin_for_redirect_uri(redirect_uri)
 
+    if state and not parsed:
+        msg = quote("授权状态无效或已过期，请重新发起飞书授权", safe="")
+        return RedirectResponse(f"{frontend_origin.rstrip('/')}/?auth=error&msg={msg}")
+
+    uid_raw = parsed.get("uid")
     try:
-        await _user_auth.exchange_code(code, redirect_uri=redirect_uri)
+        oauth_user_id = int(uid_raw) if uid_raw is not None else None
+    except (TypeError, ValueError):
+        oauth_user_id = None
+    if oauth_user_id is None:
+        msg = quote("飞书授权回调缺少用户身份，拒绝写入 Token", safe="")
+        return RedirectResponse(f"{frontend_origin.rstrip('/')}/?auth=error&msg={msg}")
+
+    user_auth = FeishuUserAuthClient(user_id=oauth_user_id)
+    try:
+        await user_auth.exchange_code(code, redirect_uri=redirect_uri)
     except RuntimeError as exc:
         logger.error(
-            "飞书 OAuth 回调失败 redirect_uri=%s: %s",
+            "飞书 OAuth 回调失败 redirect_uri=%s user_id=%s: %s",
             redirect_uri,
+            oauth_user_id,
             exc,
         )
         msg = quote(str(exc), safe="")
         return RedirectResponse(f"{frontend_origin.rstrip('/')}/?auth=error&msg={msg}")
 
-    await ensure_minute_generated_subscription(user_auth=_user_auth)
+    await ensure_minute_generated_subscription(user_id=oauth_user_id)
     return RedirectResponse(f"{frontend_origin.rstrip('/')}/?auth=ok")

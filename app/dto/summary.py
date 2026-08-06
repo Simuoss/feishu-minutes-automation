@@ -28,6 +28,7 @@ class GenerateSummaryResponse(BaseModel):
 
 class SummaryProgressResponse(BaseModel):
     minute_token: str
+    owner_user_id: int | None = None
     status: str
     stage: str
     percent: int
@@ -38,8 +39,13 @@ class SummaryProgressResponse(BaseModel):
     updated_at: str | None = None
 
 
+class ProgressBatchItem(BaseModel):
+    minute_token: str
+    owner_user_id: int | None = None
+
+
 class SummaryProgressBatchRequest(BaseModel):
-    minute_tokens: list[str] = Field(min_length=1, max_length=100)
+    items: list[ProgressBatchItem] = Field(min_length=1, max_length=100)
 
 
 class SummaryProgressBatchResponse(BaseModel):

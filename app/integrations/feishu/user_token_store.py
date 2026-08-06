@@ -5,7 +5,6 @@ from typing import Any
 from app.core.async_bridge import run_async
 from app.data_model.entity.feishu_user_token import FeishuUserTokenUpsertEntity
 from app.repository.uow import UnitOfWork
-from app.service.metadata_db_service import get_admin_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -51,28 +50,30 @@ def _entity_to_client_dict(entity: Any) -> dict[str, Any]:
 
 
 class FeishuUserTokenStore:
-    """按 admin 用户读写 DB。"""
+    """按显式 user_id 读写飞书 Token；禁止隐式回退或 ContextVar。"""
 
-    async def _load_db(self) -> dict[str, Any] | None:
-        user_id = await get_admin_user_id()
+    @staticmethod
+    def _require_user_id(user_id: int | None) -> int:
         if user_id is None:
-            return None
+            raise RuntimeError("缺少 user_id，拒绝读写飞书 Token")
+        return int(user_id)
+
+    async def load_async(self, user_id: int) -> dict[str, Any] | None:
+        uid = self._require_user_id(user_id)
         async with UnitOfWork() as uow:
             assert uow.feishu_user_tokens is not None
-            entity = await uow.feishu_user_tokens.get_by_user_id(user_id)
+            entity = await uow.feishu_user_tokens.get_by_user_id(uid)
             if entity is None or not (entity.access_token or entity.refresh_token):
                 return None
             return _entity_to_client_dict(entity)
 
-    async def _save_db(self, data: dict[str, Any]) -> None:
-        user_id = await get_admin_user_id()
-        if user_id is None:
-            raise RuntimeError("admin 用户不存在，无法保存飞书 Token")
+    async def save_async(self, user_id: int, data: dict[str, Any]) -> None:
+        uid = self._require_user_id(user_id)
         async with UnitOfWork() as uow:
             assert uow.feishu_user_tokens is not None
             await uow.feishu_user_tokens.upsert(
                 FeishuUserTokenUpsertEntity(
-                    user_id=user_id,
+                    user_id=uid,
                     access_token=data.get("access_token"),
                     refresh_token=data.get("refresh_token"),
                     expires_at=_to_ms(data.get("expires_at")),
@@ -83,41 +84,44 @@ class FeishuUserTokenStore:
             )
             await uow.commit()
 
-    async def _clear_db(self) -> None:
-        user_id = await get_admin_user_id()
-        if user_id is None:
-            return
+    async def clear_async(self, user_id: int) -> None:
+        uid = self._require_user_id(user_id)
         async with UnitOfWork() as uow:
             assert uow.feishu_user_tokens is not None
-            await uow.feishu_user_tokens.delete_by_user_id(user_id)
+            await uow.feishu_user_tokens.delete_by_user_id(uid)
             await uow.commit()
 
-    def load(self) -> dict[str, Any] | None:
+    def load(self, user_id: int) -> dict[str, Any] | None:
         try:
-            return run_async(self._load_db())
+            return run_async(self.load_async(user_id))
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "从 DB 读取飞书 Token 失败，需重新授权后才能拉列表。err=%s",
+                "从 DB 读取飞书 Token 失败 user_id=%s，需重新授权后才能拉列表。err=%s",
+                user_id,
                 exc,
             )
             return None
 
-    def save(self, data: dict[str, Any]) -> None:
+    def save(self, user_id: int, data: dict[str, Any]) -> None:
         try:
-            run_async(self._save_db(data))
+            run_async(self.save_async(user_id, data))
         except Exception as exc:  # noqa: BLE001
-            logger.error("飞书 Token 写 DB 失败，授权状态不会持久化。err=%s", exc)
+            logger.error(
+                "飞书 Token 写 DB 失败 user_id=%s，授权状态不会持久化。err=%s",
+                user_id,
+                exc,
+            )
             raise
 
-    def clear(self) -> None:
+    def clear(self, user_id: int) -> None:
         try:
-            run_async(self._clear_db())
+            run_async(self.clear_async(user_id))
         except Exception as exc:  # noqa: BLE001
-            logger.error("清除飞书 Token DB 行失败。err=%s", exc)
+            logger.error("清除飞书 Token DB 行失败 user_id=%s。err=%s", user_id, exc)
             raise
 
-    def is_authorized(self) -> bool:
-        data = self.load()
+    def is_authorized(self, user_id: int) -> bool:
+        data = self.load(user_id)
         if not data:
             return False
         expires_at = data.get("expires_at")

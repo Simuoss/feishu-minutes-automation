@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>管理员列表 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-users" />
+</head>
+<body class="admin-body" data-admin-page="users">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+      <header class="header admin-header">
+        <div class="header-main">
+          <div>
+            <h1>管理员列表</h1>
+            <p class="subtitle">超级管理端 · 全站用户与资源概览</p>
+          </div>
+          <button id="refresh-users-btn" class="btn btn-sm" type="button">
+            <i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="view">
+        <section class="panel">
+          <div id="users-status" class="status"></div>
+          <div id="users-table-wrap" class="users-table-wrap">
+            <table class="users-table" aria-label="管理员列表">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>用户名</th>
+                  <th>状态</th>
+                  <th>会议</th>
+                  <th>分享</th>
+                  <th>密钥</th>
+                  <th>邀请发出/已兑</th>
+                  <th>飞书授权</th>
+                  <th>创建时间</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="users-tbody"></tbody>
+            </table>
+          </div>
+          <p id="users-empty" class="empty hidden">暂无用户</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260805-auth"></script>
+  <script defer src="/assets/admin-shell.js?v=20260805-users"></script>
+  <script defer src="/assets/users.js?v=20260805-users"></script>
+</body>
+</html>

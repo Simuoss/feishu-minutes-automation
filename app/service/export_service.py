@@ -19,34 +19,50 @@ class ExportService:
     def __init__(self) -> None:
         self._storage = MeetingStorageService()
 
-    def export_summary(self, minute_token: str, fmt: str) -> tuple[bytes, str, str]:
+    def export_summary(
+        self, minute_token: str, fmt: str, *, owner_user_id: int
+    ) -> tuple[bytes, str, str]:
         fmt = fmt.lower()
-        detail = self._storage.read_summary(minute_token)
+        detail = self._storage.read_summary(
+            minute_token, owner_user_id=owner_user_id
+        )
         if detail is None:
             raise LookupError("该会议尚未生成纪要")
         content = detail["content"] or ""
-        title = (self._storage.read_meta(minute_token) or {}).get("title") or minute_token
+        title = (
+            self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
+        ).get("title") or minute_token
         safe = self._safe_filename(title)
 
         if fmt == "md":
             text = self.strip_images(content)
             return text.encode("utf-8"), f"{safe}-summary.md", "text/markdown; charset=utf-8"
         if fmt == "docx":
-            data = self._summary_to_docx(minute_token, content, title)
+            data = self._summary_to_docx(
+                minute_token, content, title, owner_user_id=owner_user_id
+            )
             return data, f"{safe}-summary.docx", (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
         if fmt == "pdf":
-            data = self._summary_to_pdf(minute_token, content, title)
+            data = self._summary_to_pdf(
+                minute_token, content, title, owner_user_id=owner_user_id
+            )
             return data, f"{safe}-summary.pdf", "application/pdf"
         raise ValueError("纪要导出格式仅支持 pdf / docx / md")
 
-    def export_transcript(self, minute_token: str, fmt: str) -> tuple[bytes, str, str]:
+    def export_transcript(
+        self, minute_token: str, fmt: str, *, owner_user_id: int
+    ) -> tuple[bytes, str, str]:
         fmt = fmt.lower()
-        text = self._storage.read_transcript(minute_token)
+        text = self._storage.read_transcript(
+            minute_token, owner_user_id=owner_user_id
+        )
         if text is None:
             raise LookupError("本地没有该会议的转写文本")
-        title = (self._storage.read_meta(minute_token) or {}).get("title") or minute_token
+        title = (
+            self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
+        ).get("title") or minute_token
         safe = self._safe_filename(title)
 
         if fmt == "txt":
@@ -72,20 +88,28 @@ class ExportService:
             out.append(raw)
         return "\n".join(out).strip() + "\n"
 
-    def _resolve_image_path(self, minute_token: str, ref: str) -> Path | None:
+    def _resolve_image_path(
+        self, minute_token: str, ref: str, *, owner_user_id: int
+    ) -> Path | None:
         name = ref.replace("\\", "/").lstrip("./")
         if name.startswith("assets/"):
             name = name[len("assets/") :]
         if not name or "/" in name or "\\" in name:
             return None
-        local = self._storage.resolve_asset_path(minute_token, name)
+        local = self._storage.resolve_asset_path(
+            minute_token, name, owner_user_id=owner_user_id
+        )
         if local is not None:
             return local
         from app.core.async_bridge import run_async
         from app.service.r2_media_service import r2_media_service
 
         try:
-            return run_async(r2_media_service.materialize_asset(minute_token, name))
+            return run_async(
+                r2_media_service.materialize_asset(
+                    minute_token, name, owner_user_id=owner_user_id
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "导出时从 R2 物化配图失败 token=%s file=%s，该图将跳过。err=%s",
@@ -95,7 +119,9 @@ class ExportService:
             )
             return None
 
-    def _summary_to_docx(self, minute_token: str, markdown: str, title: str) -> bytes:
+    def _summary_to_docx(
+        self, minute_token: str, markdown: str, title: str, *, owner_user_id: int
+    ) -> bytes:
         from docx import Document
         from docx.shared import Inches
 
@@ -108,7 +134,9 @@ class ExportService:
                 continue
             image = IMAGE_LINE_RE.match(stripped)
             if image:
-                path = self._resolve_image_path(minute_token, image.group(1))
+                path = self._resolve_image_path(
+                    minute_token, image.group(1), owner_user_id=owner_user_id
+                )
                 if path and path.is_file():
                     try:
                         doc.add_picture(str(path), width=Inches(5.5))
@@ -140,7 +168,9 @@ class ExportService:
         doc.save(buffer)
         return buffer.getvalue()
 
-    def _summary_to_pdf(self, minute_token: str, markdown: str, title: str) -> bytes:
+    def _summary_to_pdf(
+        self, minute_token: str, markdown: str, title: str, *, owner_user_id: int
+    ) -> bytes:
         import markdown as md_lib
         from xhtml2pdf import pisa
 
@@ -152,7 +182,9 @@ class ExportService:
 
         def replace_img(match: re.Match[str]) -> str:
             src = match.group(1)
-            path = self._resolve_image_path(minute_token, src)
+            path = self._resolve_image_path(
+                minute_token, src, owner_user_id=owner_user_id
+            )
             if path and path.is_file():
                 return f'<img src="{path.as_uri()}" style="max-width:100%;" />'
             return ""

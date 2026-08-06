@@ -7,10 +7,16 @@ from app.core.db_base import Base
 class FigureORM(Base):
     __tablename__ = "figures"
     __table_args__ = (
-        UniqueConstraint("minute_token", "figure_id", name="uq_figures_token_figure"),
+        UniqueConstraint(
+            "owner_user_id",
+            "minute_token",
+            "figure_id",
+            name="uq_figures_owner_token_figure",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
     minute_token: Mapped[str] = mapped_column(String(32), index=True)
     figure_id: Mapped[str] = mapped_column(String(64))
     relative_path: Mapped[str | None] = mapped_column(String(512), nullable=True)

@@ -5,6 +5,7 @@ from typing import Any
 @dataclass
 class R2SyncStateEntity:
     id: int | None
+    owner_user_id: int
     minute_token: str
     video_key: str | None
     video_etag: str | None
@@ -16,6 +17,7 @@ class R2SyncStateEntity:
 
 @dataclass
 class R2SyncStateUpsertEntity:
+    owner_user_id: int
     minute_token: str
     video_key: str | None = None
     video_etag: str | None = None

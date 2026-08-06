@@ -12,6 +12,7 @@ from app.repository.orm.pipeline_job import PipelineJobORM
 def _to_entity(orm: PipelineJobORM) -> PipelineJobEntity:
     return PipelineJobEntity(
         id=orm.id,
+        owner_user_id=orm.owner_user_id,
         minute_token=orm.minute_token,
         job_type=orm.job_type,
         mode=orm.mode,
@@ -33,6 +34,7 @@ class PipelineJobRepository:
 
     async def create(self, entity: PipelineJobCreateEntity) -> PipelineJobEntity:
         orm = PipelineJobORM(
+            owner_user_id=entity.owner_user_id,
             minute_token=entity.minute_token,
             job_type=entity.job_type,
             mode=entity.mode,
@@ -74,11 +76,18 @@ class PipelineJobRepository:
         return _to_entity(orm)
 
     async def get_latest(
-        self, minute_token: str, job_type: str | None = None
+        self,
+        minute_token: str,
+        job_type: str | None = None,
+        *,
+        owner_user_id: int,
     ) -> PipelineJobEntity | None:
         stmt = (
             select(PipelineJobORM)
-            .where(PipelineJobORM.minute_token == minute_token)
+            .where(
+                PipelineJobORM.owner_user_id == owner_user_id,
+                PipelineJobORM.minute_token == minute_token,
+            )
             .order_by(PipelineJobORM.id.desc())
             .limit(1)
         )
@@ -88,10 +97,15 @@ class PipelineJobRepository:
         orm = result.scalar_one_or_none()
         return _to_entity(orm) if orm else None
 
-    async def list_by_minute_token(self, minute_token: str) -> list[PipelineJobEntity]:
+    async def list_by_minute_token(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> list[PipelineJobEntity]:
         stmt = (
             select(PipelineJobORM)
-            .where(PipelineJobORM.minute_token == minute_token)
+            .where(
+                PipelineJobORM.owner_user_id == owner_user_id,
+                PipelineJobORM.minute_token == minute_token,
+            )
             .order_by(PipelineJobORM.id.desc())
         )
         result = await self._session.execute(stmt)

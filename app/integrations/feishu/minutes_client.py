@@ -72,8 +72,18 @@ class FeishuMinutesClient:
     - 导出转写：https://open.feishu.cn/document/minutes-v1/minute-transcript/get
     """
 
-    def __init__(self, api: FeishuApiClient | None = None) -> None:
-        self._api = api or FeishuApiClient()
+    def __init__(
+        self,
+        api: FeishuApiClient | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        if api is not None:
+            self._api = api
+        elif user_id is not None:
+            self._api = FeishuApiClient(user_id=user_id)
+        else:
+            raise ValueError("FeishuMinutesClient 必须传入 user_id 或已绑定用户的 api")
 
     @staticmethod
     def extract_minute_token(value: str | None) -> str | None:
@@ -327,7 +337,7 @@ class FeishuMinutesClient:
             "file_format": file_format,
         }
         if use_user_token:
-            token = await self._api._user_auth.get_user_access_token()
+            token = await self._api._require_user_auth().get_user_access_token()
         else:
             token = await self._api._auth.get_tenant_access_token()
         api_url = (
@@ -352,9 +362,20 @@ class FeishuVcClient:
     - 获取录制文件：https://open.feishu.cn/document/server-docs/vc-v1/meeting-recording/get
     """
 
-    def __init__(self, api: FeishuApiClient | None = None) -> None:
-        self._api = api or FeishuApiClient()
-        self._minutes = FeishuMinutesClient(self._api)
+    def __init__(
+        self,
+        api: FeishuApiClient | None = None,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        if api is not None:
+            self._api = api
+        elif user_id is not None:
+            self._api = FeishuApiClient(user_id=user_id)
+        else:
+            # 录制接口可用 tenant token，允许无用户绑定
+            self._api = FeishuApiClient()
+        self._minutes = FeishuMinutesClient(api=self._api)
 
     async def get_meeting_recording(self, meeting_id: str) -> MeetingRecordingInfo:
         data = await self._api.request(

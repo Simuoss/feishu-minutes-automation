@@ -31,6 +31,15 @@ class FeishuUserTokenRepository:
         orm = result.scalar_one_or_none()
         return _to_entity(orm) if orm else None
 
+    async def list_user_ids_with_tokens(self) -> list[int]:
+        """返回已保存飞书 Token 的用户 id（用于事件回调按用户隔离拉取）。"""
+        stmt = select(FeishuUserTokenORM.user_id).where(
+            (FeishuUserTokenORM.access_token.is_not(None))
+            | (FeishuUserTokenORM.refresh_token.is_not(None))
+        )
+        result = await self._session.execute(stmt)
+        return [int(uid) for uid in result.scalars().all() if uid is not None]
+
     async def upsert(self, entity: FeishuUserTokenUpsertEntity) -> FeishuUserTokenEntity:
         stmt = select(FeishuUserTokenORM).where(
             FeishuUserTokenORM.user_id == entity.user_id

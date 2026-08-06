@@ -17,7 +17,6 @@ const shareState = {
 
 const SPEAKER_LINE_RE = /^(.+?)\s+(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s*$/;
 const TIME_ANCHOR_RE = /^\d{1,2}:\d{2}:\d{2}$/;
-const IMAGE_LINE_RE = /^!\[([^\]]*)\]\(\s*([^)\s]+)\s*\)$/;
 
 if (!shareToken) {
   document.body.innerHTML = `<main class="view"><p class="empty">缺少分享参数</p></main>`;
@@ -190,59 +189,29 @@ function setupDetailSync(mediaElement, transcriptText) {
 }
 
 function resolveAssetUrl(path) {
-  if (/^https?:\/\//i.test(path)) return withShareUrl(path);
-  const name = path.replace(/^\.?\/*/, "").replace(/^assets\//, "");
-  if (!name || name.includes("/")) return null;
+  const raw = String(path || "").trim();
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//")) {
+    return null;
+  }
+  const name = raw.replace(/^\.?\/*/, "").replace(/^assets\//, "");
+  if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) {
+    return null;
+  }
+  if (!/^fig-[\w.-]+\.(jpe?g|png|webp|gif)$/i.test(name)) {
+    return null;
+  }
   return withShareUrl(
     `${API}/share/${shareToken}/summary/assets/${encodeURIComponent(name)}`
   );
 }
 
-function renderInlineMarkdown(text) {
-  let html = escapeHtml(text);
-  html = html.replace(/`([^`]+)`/g, (_m, code) => {
-    if (TIME_ANCHOR_RE.test(code)) {
-      return `<button type="button" class="time-anchor" data-sec="${parseTimestamp(code)}">${code}</button>`;
-    }
-    return `<code>${code}</code>`;
-  });
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  return html;
-}
-
 function renderMarkdown(markdown) {
-  const lines = markdown.split(/\r?\n/);
-  const out = [];
-  lines.forEach((raw) => {
-    const line = raw.trimEnd();
-    if (!line.trim()) return;
-    const image = line.match(IMAGE_LINE_RE);
-    if (image) {
-      const url = resolveAssetUrl(image[2]);
-      if (url) {
-        out.push(
-          `<figure><a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${escapeHtml(image[1])}" loading="lazy" /></a></figure>`
-        );
-      }
-      return;
-    }
-    if (line.startsWith("图：")) {
-      out.push(`<figcaption>${renderInlineMarkdown(line.slice(2))}</figcaption>`);
-      return;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      const level = heading[1].length;
-      out.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
-    }
-    if (line.startsWith("- ") || line.startsWith("* ")) {
-      out.push(`<p>• ${renderInlineMarkdown(line.slice(2))}</p>`);
-      return;
-    }
-    out.push(`<p>${renderInlineMarkdown(line)}</p>`);
+  return renderSafeMarkdown(markdown, {
+    resolveAssetUrl,
+    isTimeAnchor: (code) => TIME_ANCHOR_RE.test(code),
+    timeAnchorSeconds: (code) =>
+      TIME_ANCHOR_RE.test(code) ? parseTimestamp(code) : null,
   });
-  return out.join("\n");
 }
 
 function bindTimeAnchors() {
@@ -339,10 +308,10 @@ async function openDetail({ allowKeyRetry = true } = {}) {
   });
   if (hasContent) $("#media-section").classList.remove("hidden");
 
-  if (data.transcript) {
-    shareState.fullTranscriptText = data.transcript;
-    if (mediaElement) setupDetailSync(mediaElement, data.transcript);
-    else renderTranscript(parseTranscript(data.transcript));
+  const hasTranscript = Boolean(data.has_transcript);
+  if (hasTranscript) {
+    shareState.fullTranscriptText = "";
+    $("#transcript-scroll").innerHTML = thinkingHtml({ block: true });
     $("#transcript-section").classList.remove("hidden");
     hasContent = true;
   }
@@ -368,14 +337,35 @@ async function openDetail({ allowKeyRetry = true } = {}) {
 
   document
     .querySelector('.tab-btn[data-tab="transcript"]')
-    .classList.toggle("hidden", !data.transcript);
-  if (data.transcript || hasSummary) {
+    .classList.toggle("hidden", !hasTranscript);
+  if (hasTranscript || hasSummary) {
     $("#detail-tabs").classList.remove("hidden");
-    switchDetailTab(hasSummary || !data.transcript ? "summary" : "transcript");
+    switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
     hasContent = true;
   }
   if (!hasContent) $("#detail-empty").classList.remove("hidden");
   applyExportVisibility();
+
+  if (hasTranscript) {
+    try {
+      const tRes = await shareFetch(`/share/${shareToken}/transcript`);
+      if (tRes.ok) {
+        const tData = await tRes.json();
+        const text = tData.transcript || "";
+        shareState.fullTranscriptText = text;
+        if (text) {
+          if (mediaElement) setupDetailSync(mediaElement, text);
+          else renderTranscript(parseTranscript(text));
+        } else {
+          $("#transcript-scroll").innerHTML = `<p class="muted">暂无转写</p>`;
+        }
+      } else {
+        $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
+      }
+    } catch {
+      $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
+    }
+  }
 }
 
 function showUnlock(title) {

@@ -11,10 +11,17 @@ class Settings(BaseSettings):
     feishu_app_id: str
     feishu_app_secret: str
 
-    # 管理端访问口令；前端登录后以 Bearer 携带
+    # 超级管理员解锁口令（兑换 SUPER_ADMIN JWT）；兼容旧名 ADMIN_TOKEN
     admin_token: str = ""
-    # 种子用户 admin 的初始密码；空则回退 ADMIN_TOKEN
-    bootstrap_admin_password: str = ""
+    super_admin_token: str = ""
+
+    # 用户/超管 JWT
+    jwt_secret: str = ""
+    jwt_expire_seconds: int = 604800
+
+    @property
+    def resolved_super_admin_token(self) -> str:
+        return (self.super_admin_token or self.admin_token or "").strip()
 
     app_host: str = "0.0.0.0"
     app_port: int = 7354

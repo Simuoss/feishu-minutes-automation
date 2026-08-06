@@ -1,10 +1,4 @@
-"""管理端鉴权中间件。
-
-- 常规 API：Authorization: Bearer <ADMIN_TOKEN>
-- 登录：POST body { token }
-- EventSource / <video src> 无法带 Header：使用短期 access_ticket 查询参数
-  （由已登录管理员兑换，不是 ADMIN_TOKEN 本身）
-"""
+"""管理端鉴权中间件：Bearer JWT 或 access_ticket。"""
 
 from __future__ import annotations
 
@@ -16,15 +10,19 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from app.core.config import settings
+from app.core.jwt_auth import AuthPrincipal, decode_token
 from app.service.admin_ticket_store import admin_ticket_store
 
-# 飞书 OAuth 是浏览器整页跳转，无法带 Bearer；分享访客走 /share/*
 _PUBLIC_EXACT = {
     "/api/v1/auth/admin/login",
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+    "/api/v1/auth/super/login",
 }
 _PUBLIC_PREFIXES = (
     "/api/v1/auth/feishu/login",
     "/api/v1/auth/feishu/callback",
+    "/api/v1/auth/invites/check",
     "/api/v1/share/",
 )
 
@@ -44,19 +42,29 @@ def extract_bearer_token(request: Request) -> str | None:
     return None
 
 
-def is_admin_token(token: str | None) -> bool:
-    expected = (settings.admin_token or "").strip()
+def is_super_admin_token(token: str | None) -> bool:
+    expected = settings.resolved_super_admin_token
     if not expected or not token:
         return False
     return secrets.compare_digest(token, expected)
 
 
-def is_request_authorized(request: Request) -> bool:
-    if is_admin_token(extract_bearer_token(request)):
-        return True
-    # 兼容旧参数名时直接拒绝：不再接受 admin_token 进 URL
+def resolve_request_principal(request: Request) -> AuthPrincipal | None:
+    bearer = extract_bearer_token(request)
+    if bearer:
+        principal = decode_token(bearer)
+        if principal is not None:
+            return principal
+        # 兼容：极早期仍有人把超管口令当 Bearer；拒绝作为业务会话，避免绕过 JWT
     ticket = (request.query_params.get("access_ticket") or "").strip()
-    return admin_ticket_store.valid(ticket)
+    # query 票收窄：仅 GET/HEAD + 白名单前缀，避免泄露后等于完整会话
+    return admin_ticket_store.resolve(
+        ticket, method=request.method, path=request.url.path
+    )
+
+
+def is_request_authorized(request: Request) -> bool:
+    return resolve_request_principal(request) is not None
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
@@ -70,15 +78,28 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         if _is_public(path):
             return await call_next(request)
 
-        if not (settings.admin_token or "").strip():
+        if not (settings.jwt_secret or "").strip():
             return JSONResponse(
                 status_code=503,
-                content={"detail": "未配置 ADMIN_TOKEN，管理端不可用"},
+                content={"detail": "未配置 JWT_SECRET，管理端不可用"},
             )
 
-        if not is_request_authorized(request):
+        principal = resolve_request_principal(request)
+        if principal is None:
+            # query 票被拒时给更明确的提示（方法/路径不在白名单）
+            ticket = (request.query_params.get("access_ticket") or "").strip()
+            if ticket:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "访问票无效或无权访问该接口（票仅用于媒体/SSE 只读）"
+                    },
+                )
             return JSONResponse(
                 status_code=401,
                 content={"detail": "需要管理员登录"},
             )
+
+        # 身份只挂在 request.state，由 Router 显式向下传递；禁止 ContextVar
+        request.state.auth = principal
         return await call_next(request)

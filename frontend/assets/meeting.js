@@ -7,6 +7,7 @@ const detailState = {
   mediaHandlers: null,
   activeSegmentIndex: -1,
   token: "",
+  ownerUserId: "",
   summaryMarkdown: "",
   summaryStream: null,
   streamBuffer: "",
@@ -20,9 +21,16 @@ const detailState = {
   scrollMode: localStorage.getItem("minutes_scroll_mode") === "free" ? "free" : "follow",
 };
 
+/** 超管访问他人资源时附带 owner_user_id；普通用户由 JWT 决定，无需传。 */
+function withOwnerQuery(url) {
+  const owner = detailState.ownerUserId;
+  if (!owner) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}owner_user_id=${encodeURIComponent(owner)}`;
+}
+
 const SPEAKER_LINE_RE = /^(.+?)\s+(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s*$/;
 const TIME_ANCHOR_RE = /^\d{1,2}:\d{2}:\d{2}$/;
-const IMAGE_LINE_RE = /^!\[([^\]]*)\]\(\s*([^)\s]+)\s*\)$/;
 
 function parseTimestamp(value) {
   const parts = value.trim().split(":");
@@ -239,152 +247,33 @@ function anchorSeconds(text) {
   return parseTimestamp(text);
 }
 
-function renderInlineMarkdown(text) {
-  let html = escapeHtml(text);
-  // 时间锚点渲染为可点击按钮，其余行内代码保持原样
-  html = html.replace(/`([^`]+)`/g, (_match, code) => {
-    const seconds = anchorSeconds(code);
-    if (seconds !== null) {
-      return `<button type="button" class="time-anchor" data-sec="${seconds}">${code}</button>`;
-    }
-    return `<code>${code}</code>`;
-  });
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  return html;
-}
-
-// 纪要里的图片写成 assets/fig-01.jpg，需要转成后端的配图接口地址
+// 纪要图片只认相对 assets/fig-*，拒绝外链（防 XSS / 钓鱼）
 function resolveAssetUrl(path) {
-  if (/^https?:\/\//i.test(path)) return path;
-  const name = path.replace(/^\.?\/*/, "").replace(/^assets\//, "");
-  if (!name || name.includes("/")) return null;
+  const raw = String(path || "").trim();
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//")) {
+    return null;
+  }
+  const name = raw.replace(/^\.?\/*/, "").replace(/^assets\//, "");
+  if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) {
+    return null;
+  }
+  if (!/^fig-[\w.-]+\.(jpe?g|png|webp|gif)$/i.test(name)) {
+    return null;
+  }
   if (!detailState.token) return null;
   return withAccessTicketQuery(
-    `${API}/meetings/${detailState.token}/summary/assets/${encodeURIComponent(name)}`
+    withOwnerQuery(
+      `${API}/meetings/${detailState.token}/summary/assets/${encodeURIComponent(name)}`
+    )
   );
 }
 
 function renderMarkdown(markdown) {
-  const lines = markdown.split(/\r?\n/);
-  const out = [];
-  let listTag = null;
-  let inCodeBlock = false;
-  let awaitingCaption = false;
-  const codeBuffer = [];
-
-  const closeFigure = () => {
-    if (awaitingCaption) {
-      out.push("</figure>");
-      awaitingCaption = false;
-    }
-  };
-
-  const closeList = () => {
-    if (listTag) {
-      out.push(`</${listTag}>`);
-      listTag = null;
-    }
-  };
-  const openList = (tag) => {
-    if (listTag !== tag) {
-      closeList();
-      out.push(`<${tag}>`);
-      listTag = tag;
-    }
-  };
-
-  lines.forEach((raw) => {
-    const line = raw.trimEnd();
-
-    if (awaitingCaption && !inCodeBlock) {
-      // 图注必须紧跟在图片后面，否则这张图就单独成块
-      if (line.startsWith("图：")) {
-        out.push(`<figcaption>${renderInlineMarkdown(line.slice(2))}</figcaption></figure>`);
-        awaitingCaption = false;
-        return;
-      }
-      closeFigure();
-    }
-
-    if (line.trimStart().startsWith("```")) {
-      if (inCodeBlock) {
-        out.push(`<pre><code>${escapeHtml(codeBuffer.join("\n"))}</code></pre>`);
-        codeBuffer.length = 0;
-      } else {
-        closeList();
-      }
-      inCodeBlock = !inCodeBlock;
-      return;
-    }
-    if (inCodeBlock) {
-      codeBuffer.push(raw);
-      return;
-    }
-
-    if (!line.trim()) {
-      closeList();
-      return;
-    }
-
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      closeList();
-      const level = heading[1].length;
-      out.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
-    }
-
-    if (/^-{3,}$/.test(line)) {
-      closeList();
-      out.push("<hr />");
-      return;
-    }
-
-    const image = line.match(IMAGE_LINE_RE);
-    if (image) {
-      const url = resolveAssetUrl(image[2]);
-      if (url) {
-        closeList();
-        const alt = escapeHtml(image[1]);
-        out.push(
-          `<figure><a href="${url}" target="_blank" rel="noopener">` +
-            `<img src="${url}" alt="${alt}" loading="lazy" /></a>`
-        );
-        awaitingCaption = true;
-      }
-      return;
-    }
-
-    if (line.startsWith("> ")) {
-      closeList();
-      out.push(`<blockquote>${renderInlineMarkdown(line.slice(2))}</blockquote>`);
-      return;
-    }
-
-    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
-    if (bullet) {
-      openList("ul");
-      out.push(`<li>${renderInlineMarkdown(bullet[1])}</li>`);
-      return;
-    }
-
-    const ordered = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (ordered) {
-      openList("ol");
-      out.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
-      return;
-    }
-
-    closeList();
-    out.push(`<p>${renderInlineMarkdown(line)}</p>`);
+  return renderSafeMarkdown(markdown, {
+    resolveAssetUrl,
+    isTimeAnchor: (code) => TIME_ANCHOR_RE.test(code),
+    timeAnchorSeconds: anchorSeconds,
   });
-
-  if (inCodeBlock && codeBuffer.length) {
-    out.push(`<pre><code>${escapeHtml(codeBuffer.join("\n"))}</code></pre>`);
-  }
-  closeFigure();
-  closeList();
-  return out.join("\n");
 }
 
 function bindTimeAnchors() {
@@ -577,7 +466,7 @@ function renderMetrics(metrics) {
 
 async function loadMetrics(token) {
   try {
-    const res = await apiFetch(`/meetings/${token}/summary/metrics`);
+    const res = await apiFetch(withOwnerQuery(`/meetings/${token}/summary/metrics`));
     if (!res.ok) {
       renderMetrics(null);
       return;
@@ -586,6 +475,21 @@ async function loadMetrics(token) {
   } catch {
     renderMetrics(null);
   }
+}
+
+function redactionWhyText(fig) {
+  const labels = (fig.regions || [])
+    .map((r) => (r.label || "").trim())
+    .filter(Boolean);
+  const unique = [...new Set(labels)];
+  if (unique.length) return `涉敏原因：${unique.join("、")}`;
+  const attemptReason =
+    fig.attempts && fig.attempts.length
+      ? fig.attempts[fig.attempts.length - 1].reason
+      : "";
+  if (fig.abandon_reason) return `涉敏说明：${fig.abandon_reason}`;
+  if (attemptReason) return `涉敏说明：${attemptReason}`;
+  return "涉敏原因：系统检出敏感信息";
 }
 
 function renderRedactionPanel(audit) {
@@ -601,7 +505,7 @@ function renderRedactionPanel(audit) {
     return;
   }
   if (empty) empty.classList.add("hidden");
-  summary.textContent = `扫描 ${audit.scanned} · 敏感 ${audit.sensitive} · 打码 ${audit.redacted} · 放弃 ${audit.abandoned}`;
+  summary.textContent = `扫描 ${audit.scanned} · 敏感 ${audit.sensitive} · 已打码 ${audit.redacted} · 放弃 ${audit.abandoned}`;
   const interesting = (audit.figures || []).filter(
     (f) => f.sensitive || f.status === "ABANDONED" || f.status === "MANUAL_APPROVED"
   );
@@ -612,43 +516,43 @@ function renderRedactionPanel(audit) {
   }
   list.innerHTML = interesting
     .map((fig) => {
-      const regionsText = (fig.regions || [])
-        .map(
-          (r) =>
-            `${r.label || "区域"} (${Number(r.x1).toFixed(2)},${Number(r.y1).toFixed(2)})-(${Number(r.x2).toFixed(2)},${Number(r.y2).toFixed(2)})`
-        )
-        .join("；");
-      const lastReason =
-        fig.abandon_reason ||
-        (fig.attempts && fig.attempts.length
-          ? fig.attempts[fig.attempts.length - 1].reason
-          : "");
       const token = detailState.token;
-      const originalSrc = fig.original_relative
-        ? withAccessTicketQuery(
-            `${API}/meetings/${token}/redaction/originals/${encodeURIComponent(fig.figure_id)}.jpg`
-          )
-        : "";
-      const assetSrc = fig.asset_relative
-        ? withAccessTicketQuery(
+      const status = String(fig.status || "").toUpperCase();
+      const canShow =
+        Boolean(fig.asset_url) &&
+        (status === "REDACTED" || status === "MANUAL_APPROVED");
+      let imgSrc = "";
+      if (canShow) {
+        const raw = String(fig.asset_url);
+        if (/^https?:\/\//i.test(raw)) imgSrc = raw;
+        else if (raw.startsWith("/api/")) imgSrc = `${location.origin}${raw}`;
+        else {
+          imgSrc = withOwnerQuery(
             `${API}/meetings/${token}/summary/assets/${encodeURIComponent(fig.figure_id)}.jpg`
-          )
-        : "";
+          );
+        }
+        imgSrc = withAccessTicketQuery(imgSrc);
+      }
+      const effect =
+        status === "ABANDONED"
+          ? "脱敏效果：已放弃该图（未进入纪要）"
+          : status === "REDACTED" || status === "MANUAL_APPROVED"
+            ? "脱敏效果：敏感区域已马赛克处理"
+            : `状态：${status}`;
       return `
       <article class="redaction-card" data-figure-id="${escapeHtml(fig.figure_id)}">
         <header>
           <strong>${escapeHtml(fig.figure_id)}</strong>
-          <span class="redaction-status status-${escapeHtml(String(fig.status).toLowerCase())}">${escapeHtml(fig.status)}</span>
+          <span class="redaction-status status-${escapeHtml(status.toLowerCase())}">${escapeHtml(status)}</span>
         </header>
+        <p class="redaction-reason">${escapeHtml(redactionWhyText(fig))}</p>
+        <p class="redaction-effect">${escapeHtml(effect)}</p>
         <div class="redaction-images">
-          ${originalSrc ? `<figure><img src="${originalSrc}" alt="原图" loading="lazy" /><figcaption>原图</figcaption></figure>` : "<p>无原图</p>"}
-          ${assetSrc ? `<figure><img src="${assetSrc}" alt="打码图" loading="lazy" /><figcaption>打码/成文用图</figcaption></figure>` : "<p>无成文图</p>"}
-        </div>
-        <p class="redaction-regions">${escapeHtml(regionsText || "无坐标")}</p>
-        ${lastReason ? `<p class="redaction-reason">${escapeHtml(lastReason)}</p>` : ""}
-        <div class="redaction-actions">
-          <button type="button" class="btn btn-sm" data-approve="${escapeHtml(fig.figure_id)}">按当前框放行</button>
-          <button type="button" class="btn btn-sm" data-abandon="${escapeHtml(fig.figure_id)}">放弃此图</button>
+          ${
+            imgSrc
+              ? `<figure><img src="${imgSrc}" alt="脱敏后配图" loading="lazy" /><figcaption>脱敏后</figcaption></figure>`
+              : `<p class="redaction-empty">无可展示的打码图</p>`
+          }
         </div>
       </article>`;
     })
@@ -658,7 +562,7 @@ function renderRedactionPanel(audit) {
 
 async function loadRedactionAudit(token) {
   try {
-    const res = await apiFetch(`/meetings/${token}/redaction/audit`);
+    const res = await apiFetch(withOwnerQuery(`/meetings/${token}/redaction/audit`));
     if (!res.ok) {
       renderRedactionPanel(null);
       return;
@@ -692,7 +596,7 @@ function renderSummary(markdown, meta) {
 
 async function loadSummary(token) {
   try {
-    const res = await apiFetch(`/meetings/${token}/summary`);
+    const res = await apiFetch(withOwnerQuery(`/meetings/${token}/summary`));
     if (res.status === 404) {
       renderSummary("", null);
       return false;
@@ -707,11 +611,15 @@ async function loadSummary(token) {
   }
 }
 
-function closeSummaryStream() {
+function closeSummaryStreamConnection() {
   if (detailState.summaryStream) {
     detailState.summaryStream.close();
     detailState.summaryStream = null;
   }
+}
+
+function closeSummaryStream() {
+  closeSummaryStreamConnection();
   detailState.streamBuffer = "";
   detailState.streamRenderScheduled = false;
   detailState.planCount = 0;
@@ -722,6 +630,7 @@ function closeSummaryStream() {
     plan.classList.add("hidden");
   }
 }
+
 
 function isViewportNearBottom() {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
@@ -801,7 +710,9 @@ function applySummaryStatus(data) {
   const generating = data.status === "QUEUED" || data.status === "GENERATING";
   $("#generate-summary-btn").disabled = generating;
   if (!generating) {
+    // COMPLETED / FAILED / CANCELLED 等终态：关掉 SSE 与 ticker
     stopSummaryTicker();
+    closeSummaryStreamConnection();
     return;
   }
 
@@ -823,7 +734,9 @@ async function openSummaryStream(token) {
   closeSummaryStream();
   await ensureAccessTicket();
   const source = new EventSource(
-    withAccessTicketQuery(`${API}/meetings/${token}/summary/stream`)
+    withAccessTicketQuery(
+      withOwnerQuery(`${API}/meetings/${token}/summary/stream`)
+    )
   );
   detailState.summaryStream = source;
 
@@ -859,8 +772,10 @@ async function openSummaryStream(token) {
   source.addEventListener("done", (e) => {
     const data = JSON.parse(e.data);
     detailState.streamBuffer = "";
+    detailState.summaryStatus = "COMPLETED";
     renderPlanItems([]);
     stopSummaryTicker();
+    closeSummaryStreamConnection();
     showSummaryProgress(false);
     $("#generate-summary-btn").disabled = false;
     renderSummary(data.content, data.meta);
@@ -869,8 +784,10 @@ async function openSummaryStream(token) {
   source.addEventListener("failed", (e) => {
     const data = JSON.parse(e.data);
     detailState.streamBuffer = "";
+    detailState.summaryStatus = "FAILED";
     renderPlanItems([]);
     stopSummaryTicker();
+    closeSummaryStreamConnection();
     detailState.lastStatus = { status: "FAILED", percent: 0, stage: data.message || "生成失败" };
     showSummaryProgress(true, {
       label: `生成失败：${data.message || "未知原因"}`,
@@ -894,7 +811,7 @@ async function generateSummary() {
     return;
   }
   try {
-    const prog = await apiFetch(`/meetings/${token}/summary/progress`);
+    const prog = await apiFetch(withOwnerQuery(`/meetings/${token}/summary/progress`));
     if (prog.ok) {
       const data = await prog.json();
       applySummaryStatus(data);
@@ -924,7 +841,7 @@ async function generateSummary() {
   });
 
   try {
-    const res = await apiFetch(`/meetings/${token}/summary`, {
+    const res = await apiFetch(withOwnerQuery(`/meetings/${token}/summary`), {
       method: "POST",
       body: JSON.stringify({ force, mode }),
     });
@@ -943,41 +860,49 @@ async function generateSummary() {
   }
 }
 
-async function approveRedactionFigure(figureId) {
-  const token = detailState.token;
-  if (!token || !figureId) return;
-  const auditRes = await apiFetch(`/meetings/${token}/redaction/audit`);
-  if (!auditRes.ok) throw new Error("读取脱敏审计失败");
-  const audit = await auditRes.json();
-  const fig = (audit.figures || []).find((f) => f.figure_id === figureId);
-  if (!fig || !(fig.regions || []).length) {
-    throw new Error("该图没有可用坐标，无法按框放行");
+async function loadTranscript(minuteToken, mediaElement) {
+  try {
+    const res = await apiFetch(
+      withOwnerQuery(`/meetings/local/${minuteToken}/transcript`)
+    );
+    if (!res.ok) {
+      $("#transcript-scroll").innerHTML =
+        `<p class="muted">转写加载失败</p>`;
+      return;
+    }
+    const data = await res.json();
+    const text = data.transcript || "";
+    detailState.fullTranscriptText = text;
+    if (!text) {
+      $("#transcript-scroll").innerHTML =
+        `<p class="muted">暂无转写</p>`;
+      return;
+    }
+    if (mediaElement) {
+      setupDetailSync(mediaElement, text);
+    } else {
+      renderTranscript(parseTranscript(text));
+    }
+  } catch (e) {
+    $("#transcript-scroll").innerHTML =
+      `<p class="muted">转写加载失败：${escapeHtml(e.message || "")}</p>`;
   }
-  const res = await apiFetch(`/meetings/${token}/redaction/approve`, {
-    method: "POST",
-    body: JSON.stringify({ figure_id: figureId, regions: fig.regions }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || res.statusText);
-  }
-  const data = await res.json();
-  renderRedactionPanel(data.audit);
 }
 
-async function abandonRedactionFigure(figureId) {
-  const token = detailState.token;
-  if (!token || !figureId) return;
-  const res = await apiFetch(`/meetings/${token}/redaction/abandon`, {
-    method: "POST",
-    body: JSON.stringify({ figure_id: figureId, reason: "人工放弃" }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || res.statusText);
+async function maybeFollowSummaryStream(token) {
+  try {
+    const prog = await apiFetch(
+      withOwnerQuery(`/meetings/${token}/summary/progress`)
+    );
+    if (!prog.ok) return;
+    const data = await prog.json();
+    applySummaryStatus(data);
+    if (data.status === "QUEUED" || data.status === "GENERATING") {
+      openSummaryStream(token);
+    }
+  } catch {
+    /* 404 / 网络：无需跟随 */
   }
-  const data = await res.json();
-  renderRedactionPanel(data.audit);
 }
 
 async function openDetail(minuteToken) {
@@ -1000,7 +925,7 @@ async function openDetail(minuteToken) {
   renderSummary("", null);
 
   try {
-    const res = await apiFetch(`/meetings/local/${minuteToken}`);
+    const res = await apiFetch(withOwnerQuery(`/meetings/local/${minuteToken}`));
     if (!res.ok) throw new Error("本地资源不存在，请先下载该会议");
     const data = await res.json();
 
@@ -1034,15 +959,17 @@ async function openDetail(minuteToken) {
           const target = new URL(mediaUrl);
           const apiHost = new URL(API).host;
           if (target.host === apiHost) {
-            mediaUrl = withAccessTicketQuery(mediaUrl);
+            mediaUrl = withAccessTicketQuery(withOwnerQuery(mediaUrl));
           }
         } catch {
           /* keep as-is */
         }
       } else {
         mediaUrl = withAccessTicketQuery(
-          mediaUrl ||
-            `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
+          withOwnerQuery(
+            mediaUrl ||
+              `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
+          )
         );
       }
       if (mf.kind === "video") {
@@ -1067,26 +994,28 @@ async function openDetail(minuteToken) {
 
     if (hasContent) $("#media-section").classList.remove("hidden");
 
-    if (data.transcript) {
-      detailState.fullTranscriptText = data.transcript;
-      if (mediaElement) {
-        setupDetailSync(mediaElement, data.transcript);
-      } else {
-        renderTranscript(parseTranscript(data.transcript));
-      }
+    const hasTranscript = Boolean(data.has_transcript);
+    if (hasTranscript) {
+      detailState.fullTranscriptText = "";
+      $("#transcript-scroll").innerHTML = thinkingHtml({ block: true });
       $("#transcript-section").classList.remove("hidden");
       hasContent = true;
+      loadTranscript(minuteToken, mediaElement);
     }
 
     document
       .querySelector('.tab-btn[data-tab="transcript"]')
-      .classList.toggle("hidden", !data.transcript);
+      .classList.toggle("hidden", !hasTranscript);
 
-    if (data.transcript || hasSummary) {
+    if (hasTranscript || hasSummary) {
       $("#detail-tabs").classList.remove("hidden");
-      switchDetailTab(hasSummary || !data.transcript ? "summary" : "transcript");
+      switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
       hasContent = true;
-      openSummaryStream(minuteToken);
+    }
+
+    // 已有完成纪要时不挂空 SSE；仅生成中才跟随
+    if (!hasSummary) {
+      await maybeFollowSummaryStream(minuteToken);
     }
 
     if (!hasContent) {
@@ -1103,16 +1032,6 @@ $("#scroll-mode-btn").addEventListener("click", toggleScrollMode);
 $("#generate-summary-btn").addEventListener("click", generateSummary);
 $("#refresh-redaction-btn")?.addEventListener("click", () => {
   if (detailState.token) loadRedactionAudit(detailState.token);
-});
-$("#redaction-list")?.addEventListener("click", async (e) => {
-  const approveId = e.target.closest("[data-approve]")?.getAttribute("data-approve");
-  const abandonId = e.target.closest("[data-abandon]")?.getAttribute("data-abandon");
-  try {
-    if (approveId) await approveRedactionFigure(approveId);
-    if (abandonId) await abandonRedactionFigure(abandonId);
-  } catch (err) {
-    alert(err.message || String(err));
-  }
 });
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => switchDetailTab(btn.dataset.tab));
@@ -1200,7 +1119,7 @@ function syncShareModeUi() {
 async function refreshShareList() {
   const box = $("#share-list");
   if (!box || !detailState.token) return;
-  const res = await apiFetch(`/meetings/${detailState.token}/shares`);
+  const res = await apiFetch(withOwnerQuery(`/meetings/${detailState.token}/shares`));
   if (!res.ok) {
     box.innerHTML = `<p class="modal-hint">加载分享列表失败</p>`;
     return;
@@ -1251,7 +1170,7 @@ async function createShare() {
     alert("请先创建并选择一把密钥");
     return;
   }
-  const res = await apiFetch(`/meetings/${detailState.token}/shares`, {
+  const res = await apiFetch(withOwnerQuery(`/meetings/${detailState.token}/shares`), {
     method: "POST",
     body: JSON.stringify({ access_mode, allow_export, access_key_id }),
   });
@@ -1301,8 +1220,13 @@ $("#share-dialog")?.addEventListener("click", async (e) => {
 bindAdminNav();
 checkAuth();
 
-const token = new URLSearchParams(location.search).get("token")?.trim();
+const _pageParams = new URLSearchParams(location.search);
+const token = _pageParams.get("token")?.trim();
+detailState.ownerUserId = (_pageParams.get("owner_user_id") || "").trim();
 if (!token) {
+  location.replace("/");
+} else if (isSuperAdminView() && !detailState.ownerUserId) {
+  alert("超级管理员查看会议详情时必须指定所属用户（请从全站列表进入）");
   location.replace("/");
 } else {
   openDetail(token);

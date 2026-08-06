@@ -8,6 +8,7 @@ from app.repository.orm.figure import FigureORM
 def _to_entity(orm: FigureORM) -> FigureEntity:
     return FigureEntity(
         id=orm.id,
+        owner_user_id=orm.owner_user_id,
         minute_token=orm.minute_token,
         figure_id=orm.figure_id,
         relative_path=orm.relative_path,
@@ -23,24 +24,37 @@ class FigureRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_by_minute_token(self, minute_token: str) -> list[FigureEntity]:
+    async def list_by_minute_token(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> list[FigureEntity]:
         stmt = (
             select(FigureORM)
-            .where(FigureORM.minute_token == minute_token)
+            .where(
+                FigureORM.owner_user_id == owner_user_id,
+                FigureORM.minute_token == minute_token,
+            )
             .order_by(FigureORM.figure_id.asc())
         )
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]
 
     async def replace_for_minute(
-        self, minute_token: str, figures: list[FigureUpsertEntity]
+        self,
+        minute_token: str,
+        figures: list[FigureUpsertEntity],
+        *,
+        owner_user_id: int,
     ) -> list[FigureEntity]:
         await self._session.execute(
-            delete(FigureORM).where(FigureORM.minute_token == minute_token)
+            delete(FigureORM).where(
+                FigureORM.owner_user_id == owner_user_id,
+                FigureORM.minute_token == minute_token,
+            )
         )
         out: list[FigureEntity] = []
         for item in figures:
             orm = FigureORM(
+                owner_user_id=owner_user_id,
                 minute_token=minute_token,
                 figure_id=item.figure_id,
                 relative_path=item.relative_path,
@@ -58,6 +72,7 @@ class FigureRepository:
 
     async def upsert(self, entity: FigureUpsertEntity) -> FigureEntity:
         stmt = select(FigureORM).where(
+            FigureORM.owner_user_id == entity.owner_user_id,
             FigureORM.minute_token == entity.minute_token,
             FigureORM.figure_id == entity.figure_id,
         )
@@ -65,6 +80,7 @@ class FigureRepository:
         orm = result.scalar_one_or_none()
         if orm is None:
             orm = FigureORM(
+                owner_user_id=entity.owner_user_id,
                 minute_token=entity.minute_token,
                 figure_id=entity.figure_id,
             )

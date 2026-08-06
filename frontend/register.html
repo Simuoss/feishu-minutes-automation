@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>注册 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260805-auth" />
+</head>
+<body>
+  <div id="app" class="login-page">
+    <main class="login-card">
+      <h1>注册账号</h1>
+      <p class="subtitle">需持有一次性邀请码或邀请链接</p>
+      <label class="field field-wide">
+        <span>邀请码</span>
+        <input id="invite-code-input" type="text" autocomplete="off" placeholder="粘贴邀请码" />
+      </label>
+      <label class="field field-wide">
+        <span>用户名</span>
+        <input id="register-username-input" type="text" autocomplete="username" placeholder="2–32 位" />
+      </label>
+      <label class="field field-wide">
+        <span>密码</span>
+        <input id="register-password-input" type="password" autocomplete="new-password" placeholder="至少 6 位" />
+      </label>
+      <p id="register-error" class="login-error hidden"></p>
+      <button id="register-btn" class="btn btn-primary" type="button"><i class="ri ri-user-add-line" aria-hidden="true"></i><span class="btn-label">注册并登录</span></button>
+      <button id="feishu-sso-btn" class="btn btn-ghost" type="button" disabled title="即将支持"><i class="ri ri-flashlight-line" aria-hidden="true"></i><span class="btn-label">飞书 SSO（即将支持）</span></button>
+      <p class="login-foot">已有账号？<a href="/login.html">去登录</a></p>
+    </main>
+  </div>
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260805-auth"></script>
+  <script defer src="/assets/register.js?v=20260805-auth"></script>
+</body>
+</html>

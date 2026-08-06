@@ -21,7 +21,9 @@ def generate_access_key_plaintext() -> str:
 
 
 class AccessKeyService:
-    async def create(self, *, name: str, expires_at: int) -> tuple[AccessKeyEntity, str]:
+    async def create(
+        self, *, name: str, expires_at: int, owner_user_id: int
+    ) -> tuple[AccessKeyEntity, str]:
         name = name.strip()
         if not name:
             raise ValueError("密钥名称不能为空")
@@ -30,16 +32,13 @@ class AccessKeyService:
             raise ValueError("过期时间必须晚于当前时间")
 
         plaintext = generate_access_key_plaintext()
-        from app.service.metadata_db_service import get_admin_user_id
-
-        owner_id = await get_admin_user_id()
         entity = AccessKeyCreateEntity(
             name=name,
             key_hash=hash_access_key(plaintext),
             key_prefix=plaintext[:10],
             expires_at=expires_at,
             created_at=now,
-            owner_user_id=owner_id,
+            owner_user_id=owner_user_id,
         )
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None
@@ -47,18 +46,25 @@ class AccessKeyService:
             await uow.commit()
         return created, plaintext
 
-    async def list_keys(self, *, include_revoked: bool = False) -> list[AccessKeyEntity]:
+    async def list_keys(
+        self, *, include_revoked: bool = False, owner_user_id: int | None = None
+    ) -> list[AccessKeyEntity]:
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None
             return await uow.access_keys.list_all(
-                AccessKeyQueryEntity(include_revoked=include_revoked)
+                AccessKeyQueryEntity(
+                    include_revoked=include_revoked,
+                    owner_user_id=owner_user_id,
+                )
             )
 
-    async def revoke(self, key_id: int) -> AccessKeyEntity:
+    async def revoke(self, key_id: int, *, owner_user_id: int | None = None) -> AccessKeyEntity:
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None
             row = await uow.access_keys.get_by_id(key_id)
             if row is None:
+                raise LookupError("密钥不存在")
+            if owner_user_id is not None and row.owner_user_id != owner_user_id:
                 raise LookupError("密钥不存在")
             if row.revoked_at is not None:
                 return row
@@ -66,12 +72,31 @@ class AccessKeyService:
             await uow.commit()
             if updated is None:
                 raise LookupError("密钥不存在")
-            return updated
+        # 吊销后立刻踢掉依赖该密钥的分享会话，避免 12h 内继续访问
+        from app.service.share_session_store import share_session_store
 
-    async def get(self, key_id: int) -> AccessKeyEntity | None:
+        cleared = share_session_store.invalidate_access_key(key_id)
+        if cleared:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "密钥已吊销并清理分享会话 key_id=%s sessions=%s",
+                key_id,
+                cleared,
+            )
+        return updated
+
+    async def get(
+        self, key_id: int, *, owner_user_id: int | None = None
+    ) -> AccessKeyEntity | None:
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None
-            return await uow.access_keys.get_by_id(key_id)
+            row = await uow.access_keys.get_by_id(key_id)
+            if row is None:
+                return None
+            if owner_user_id is not None and row.owner_user_id != owner_user_id:
+                return None
+            return row
 
     def is_usable(self, key: AccessKeyEntity, *, now: int | None = None) -> bool:
         now = now if now is not None else utc_now_ms()
@@ -80,12 +105,20 @@ class AccessKeyService:
         return key.expires_at > now
 
     async def list_logs(
-        self, key_id: int, *, limit: int = 100, offset: int = 0
+        self,
+        key_id: int,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        owner_user_id: int | None = None,
     ) -> list[ShareAccessLogEntity]:
         async with UnitOfWork() as uow:
             assert uow.access_keys is not None
             assert uow.share_access_logs is not None
-            if await uow.access_keys.get_by_id(key_id) is None:
+            row = await uow.access_keys.get_by_id(key_id)
+            if row is None:
+                raise LookupError("密钥不存在")
+            if owner_user_id is not None and row.owner_user_id != owner_user_id:
                 raise LookupError("密钥不存在")
             return await uow.share_access_logs.list_by_key(key_id, limit=limit, offset=offset)
 

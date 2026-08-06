@@ -1,6 +1,8 @@
 /**
  * 管理端左侧栏：会议列表 / 分享 / 密钥；会议详情额外挂载成本与脱敏区。
  * 页面通过 body[data-admin-page] 声明当前项：meetings | meeting | shares | keys
+ *
+ * 「管理端」手势：点 10 次 → 停 ≥1s → 再点 3 次 → 输入超管口令解锁。
  */
 function mountAdminSidebar() {
   const root = document.getElementById("admin-sidebar");
@@ -8,12 +10,22 @@ function mountAdminSidebar() {
 
   const page = document.body.dataset.adminPage || "meetings";
   const isMeeting = page === "meeting";
+  const superUnlocked = Boolean(getSuperJwt());
+  const superView = isSuperAdminView();
 
   const navItems = [
     { id: "meetings", href: "/", icon: "ri-list-unordered", label: "会议列表" },
     { id: "shares", href: "/shares.html", icon: "ri-share-forward-line", label: "分享管理" },
     { id: "keys", href: "/keys.html", icon: "ri-key-2-line", label: "密钥管理" },
   ];
+  if (superView) {
+    navItems.push({
+      id: "users",
+      href: "/users.html",
+      icon: "ri-admin-line",
+      label: "管理员列表",
+    });
+  }
 
   const navHtml = navItems
     .map((item) => {
@@ -37,36 +49,274 @@ function mountAdminSidebar() {
     </section>
     <section class="sidebar-section sidebar-section-grow">
       <div class="sidebar-section-head">
-        <h3 class="sidebar-section-title">脱敏复核</h3>
+        <h3 class="sidebar-section-title">脱敏记录</h3>
         <button id="refresh-redaction-btn" class="btn btn-sm" type="button" title="刷新">
           <i class="ri ri-refresh-line" aria-hidden="true"></i>
         </button>
       </div>
       <div id="redaction-panel" class="redaction-panel sidebar-redaction hidden">
+        <p id="redaction-hint" class="redaction-hint">以下为已打码结果，请提醒参会成员下次注意勿入镜敏感信息。</p>
         <p id="redaction-summary" class="redaction-summary"></p>
         <div id="redaction-list" class="redaction-list"></div>
       </div>
-      <p id="sidebar-redaction-empty" class="sidebar-empty">带图纪要脱敏后可在此复核。</p>
+      <p id="sidebar-redaction-empty" class="sidebar-empty">带图纪要脱敏后可在此查看记录。</p>
     </section>`
+    : "";
+
+  const modeToggle = superUnlocked
+    ? `<div class="sidebar-mode-toggle" role="group" aria-label="界面模式">
+        <button type="button" class="btn btn-sm${superView ? "" : " is-active"}" data-view-mode="user">管理端</button>
+        <button type="button" class="btn btn-sm${superView ? " is-active" : ""}" data-view-mode="super">超级管理端</button>
+      </div>`
+    : "";
+
+  const inviteBtn = !superView
+    ? `<button id="invite-btn" class="btn btn-sm" type="button" title="生成邀请链接">
+        <i class="ri ri-user-add-line" aria-hidden="true"></i><span class="btn-label">邀请注册</span>
+      </button>`
     : "";
 
   root.innerHTML = `
     <div class="sidebar-brand">
-      <a href="/" class="sidebar-brand-link">
-        <strong>飞书妙记</strong>
-        <span>管理端</span>
-      </a>
+      <div class="sidebar-brand-link">
+        <a href="/" class="sidebar-brand-title"><strong>飞书妙记</strong></a>
+        <span id="sidebar-brand-role" class="sidebar-brand-role${superView ? " is-super" : ""}">${
+          superView ? "超级管理端" : "管理端"
+        }</span>
+      </div>
+      ${modeToggle}
     </div>
     <nav class="sidebar-nav" aria-label="主导航">${navHtml}</nav>
     ${meetingExtras}
     <div class="sidebar-footer">
       <span id="auth-status" class="auth-status">授权检查中…</span>
       <div class="sidebar-footer-actions">
+        ${inviteBtn}
         <a id="reauth-btn" class="btn btn-sm" href="#"><i class="ri ri-shield-user-line" aria-hidden="true"></i><span class="btn-label">飞书授权</span></a>
         <a id="logout-btn" class="btn btn-sm" href="#"><i class="ri ri-logout-box-r-line" aria-hidden="true"></i><span class="btn-label">退出</span></a>
       </div>
     </div>
+    <div id="invite-toast" class="sidebar-toast hidden" role="status"></div>
   `;
+
+  ensureSuperUnlockModal();
+  bindSuperGesture(root.querySelector("#sidebar-brand-role"));
+  bindModeToggle(root);
+  bindSuperModal(document);
+  bindInvite(root);
+}
+
+function ensureSuperUnlockModal() {
+  // 挂到 body，避免侧栏 overflow/层叠上下文把弹窗压到主区按钮下面
+  let modal = document.getElementById("super-unlock-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "super-unlock-modal";
+    modal.className = "modal hidden";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.innerHTML = `
+      <div class="modal-backdrop" data-close-super></div>
+      <div class="modal-card">
+        <h3 class="modal-title">解锁超级管理端</h3>
+        <p class="modal-msg">输入超级管理员口令以查看全站数据（只读）。</p>
+        <label class="field field-wide">
+          <span>超级管理员 Token</span>
+          <input id="super-token-input" type="password" autocomplete="off" />
+        </label>
+        <p id="super-unlock-error" class="login-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn" data-close-super>取消</button>
+          <button type="button" class="btn btn-primary" id="super-unlock-btn">解锁</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } else if (modal.parentElement !== document.body) {
+    document.body.appendChild(modal);
+  }
+}
+
+function bindSuperGesture(roleEl) {
+  if (!roleEl) return;
+  let phase = "idle"; // idle | counting10 | waitGap | counting3
+  let count = 0;
+  let lastClickAt = 0;
+  let gapTimer = null;
+
+  const reset = () => {
+    phase = "idle";
+    count = 0;
+    lastClickAt = 0;
+    if (gapTimer) {
+      clearTimeout(gapTimer);
+      gapTimer = null;
+    }
+  };
+
+  roleEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const now = Date.now();
+
+    if (phase === "idle" || phase === "counting10") {
+      if (phase === "idle") {
+        phase = "counting10";
+        count = 0;
+      }
+      if (lastClickAt && now - lastClickAt > 1500) {
+        reset();
+        phase = "counting10";
+      }
+      count += 1;
+      lastClickAt = now;
+      if (count >= 10) {
+        phase = "waitGap";
+        count = 0;
+        if (gapTimer) clearTimeout(gapTimer);
+        gapTimer = setTimeout(() => {
+          // 空档已满 1s，等待第二段 3 次
+          phase = "counting3";
+          count = 0;
+          lastClickAt = 0;
+        }, 1000);
+      }
+      return;
+    }
+
+    if (phase === "waitGap") {
+      // 空档未满又点了，重置
+      reset();
+      return;
+    }
+
+    if (phase === "counting3") {
+      if (lastClickAt && now - lastClickAt > 2000) {
+        reset();
+        return;
+      }
+      count += 1;
+      lastClickAt = now;
+      if (count >= 3) {
+        reset();
+        openSuperUnlockModal();
+      }
+    }
+  });
+}
+
+function openSuperUnlockModal() {
+  const modal = document.getElementById("super-unlock-modal");
+  const err = document.getElementById("super-unlock-error");
+  const input = document.getElementById("super-token-input");
+  if (!modal) return;
+  err?.classList.add("hidden");
+  if (input) input.value = "";
+  modal.classList.remove("hidden");
+  input?.focus();
+}
+
+function closeSuperUnlockModal() {
+  document.getElementById("super-unlock-modal")?.classList.add("hidden");
+}
+
+function bindSuperModal(root) {
+  const scope = root === document ? document : root;
+  scope.querySelectorAll("[data-close-super]").forEach((el) => {
+    if (el.dataset.boundSuperClose) return;
+    el.dataset.boundSuperClose = "1";
+    el.addEventListener("click", closeSuperUnlockModal);
+  });
+  const btn = document.getElementById("super-unlock-btn");
+  const input = document.getElementById("super-token-input");
+  if (btn?.dataset.boundSuperUnlock) return;
+  if (btn) btn.dataset.boundSuperUnlock = "1";
+  const unlock = async () => {
+    const err = document.getElementById("super-unlock-error");
+    const token = (input?.value || "").trim();
+    if (!token) {
+      if (err) {
+        err.textContent = "请输入超级管理员口令";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    const res = await fetch(`${API}/auth/super/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (err) {
+        err.textContent = typeof data.detail === "string" ? data.detail : "口令错误";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    const data = await res.json();
+    if (!data.token) {
+      if (err) {
+        err.textContent = "未返回超级管理员会话";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    setSuperJwt(data.token);
+    setAdminViewMode("super");
+    clearAccessTicket();
+    location.reload();
+  };
+  btn?.addEventListener("click", unlock);
+  input?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlock();
+  });
+}
+
+function bindModeToggle(root) {
+  root.querySelectorAll("[data-view-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.getAttribute("data-view-mode");
+      if (mode === "super" && !getSuperJwt()) return;
+      setAdminViewMode(mode === "super" ? "super" : "user");
+      clearAccessTicket();
+      location.reload();
+    });
+  });
+}
+
+async function bindInvite(root) {
+  const btn = root.querySelector("#invite-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const toast = root.querySelector("#invite-toast");
+    try {
+      const res = await apiFetch("/auth/invites", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "生成失败");
+      }
+      const url = data.invite_url || "";
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      }
+      if (toast) {
+        toast.textContent = url ? `邀请链接已复制：${url}` : "已生成邀请码";
+        toast.classList.remove("hidden");
+        setTimeout(() => toast.classList.add("hidden"), 5000);
+      } else {
+        window.prompt("邀请链接（请复制）", url);
+      }
+    } catch (e) {
+      if (toast) {
+        toast.textContent = e.message || "生成邀请失败";
+        toast.classList.remove("hidden");
+        setTimeout(() => toast.classList.add("hidden"), 4000);
+      } else {
+        alert(e.message || "生成邀请失败");
+      }
+    }
+  });
 }
 
 mountAdminSidebar();

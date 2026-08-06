@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
+import time
 from urllib.parse import urlparse
 
 from starlette.requests import Request
@@ -14,6 +17,14 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 OAUTH_CALLBACK_PATH = "/api/v1/auth/feishu/callback"
+_OAUTH_STATE_TTL_SECONDS = 600
+
+
+def _oauth_state_secret() -> bytes:
+    secret = (settings.jwt_secret or "").strip()
+    if not secret:
+        raise RuntimeError("未配置 JWT_SECRET，无法签发 OAuth state")
+    return secret.encode("utf-8")
 
 
 def request_external_base(request: Request) -> str:
@@ -100,22 +111,52 @@ def encode_oauth_state(
     redirect_uri: str,
     frontend_origin: str,
     reauth: bool = False,
+    user_id: int | None = None,
 ) -> str:
+    """HMAC 签名的 OAuth state，防止伪造 uid 劫持飞书 Token 绑定。"""
     payload = {
         "r": redirect_uri,
         "f": frontend_origin,
         "reauth": bool(reauth),
+        "exp": int(time.time()) + _OAUTH_STATE_TTL_SECONDS,
     }
+    if user_id is not None:
+        payload["uid"] = int(user_id)
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii")
+    body = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    sig = hmac.new(_oauth_state_secret(), body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
 
 
 def decode_oauth_state(state: str | None) -> dict:
-    if not state:
+    if not state or "." not in state:
+        return {}
+    body, sig = state.rsplit(".", 1)
+    if not body or not sig:
         return {}
     try:
-        raw = base64.urlsafe_b64decode(state.encode("ascii") + b"===")
+        expected = hmac.new(
+            _oauth_state_secret(), body.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+    except RuntimeError:
+        logger.error("解码 OAuth state 失败：JWT_SECRET 未配置，拒绝信任回调 state")
+        return {}
+    if not hmac.compare_digest(expected, sig):
+        logger.error("OAuth state 签名校验失败，怀疑伪造回调 uid 试图绑飞书 Token")
+        return {}
+    try:
+        pad = "=" * ((4 - len(body) % 4) % 4)
+        raw = base64.urlsafe_b64decode(body.encode("ascii") + pad.encode("ascii"))
         data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else {}
     except (ValueError, json.JSONDecodeError, UnicodeError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    try:
+        exp = int(data.get("exp") or 0)
+    except (TypeError, ValueError):
+        return {}
+    if exp < int(time.time()):
+        logger.warning("OAuth state 已过期，需重新发起飞书授权")
+        return {}
+    return data

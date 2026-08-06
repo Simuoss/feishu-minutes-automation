@@ -27,3 +27,4 @@ class AccessKeyCreateEntity:
 class AccessKeyQueryEntity:
     id: int | None = None
     include_revoked: bool = False
+    owner_user_id: int | None = None

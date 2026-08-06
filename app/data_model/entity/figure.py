@@ -4,6 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class FigureEntity:
     id: int | None
+    owner_user_id: int
     minute_token: str
     figure_id: str
     relative_path: str | None
@@ -16,6 +17,7 @@ class FigureEntity:
 
 @dataclass
 class FigureUpsertEntity:
+    owner_user_id: int
     minute_token: str
     figure_id: str
     relative_path: str | None = None

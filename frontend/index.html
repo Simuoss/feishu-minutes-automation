@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260805-sidebar" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260806-tags" />
 </head>
 <body class="admin-body" data-admin-page="meetings">
   <div id="app" class="admin-shell">
@@ -39,9 +39,12 @@
       <section class="panel">
         <h2 class="panel-title">筛选条件</h2>
         <div class="filter-grid">
-          <label class="field field-wide">
+          <label class="field field-wide field-keyword">
             <span>关键词</span>
-            <input id="search-input" type="search" placeholder="标题 / 关键词 / 所有者 / token" />
+            <div class="field-inline-row">
+              <input id="search-input" type="search" placeholder="标题 / 关键词 / 所有者 / token" />
+              <button id="search-btn" class="btn btn-primary" type="button"><i class="ri ri-search-line" aria-hidden="true"></i><span class="btn-label">搜索</span></button>
+            </div>
           </label>
           <label class="field">
             <span>开始时间</span>
@@ -59,15 +62,29 @@
             <span>最长时长（分）</span>
             <input id="max-duration" type="number" min="0" step="1" placeholder="不限" />
           </label>
+          <div class="field field-wide">
+            <span>状态（可多选）</span>
+            <div id="status-filter-tags" class="filter-tags" role="group" aria-label="状态筛选">
+              <button type="button" class="filter-tag" data-status="UNSYNCED">未同步</button>
+              <button type="button" class="filter-tag" data-status="SYNCING">同步中</button>
+              <button type="button" class="filter-tag" data-status="SYNCED">已同步</button>
+              <button type="button" class="filter-tag" data-status="NO_SUMMARY">未生成纪要</button>
+              <button type="button" class="filter-tag" data-status="SUMMARY_GENERATING">生成纪要中</button>
+              <button type="button" class="filter-tag" data-status="HAS_SUMMARY">有纪要</button>
+            </div>
+          </div>
+          <div id="owner-filter-field" class="field field-wide hidden">
+            <span>管理员（可多选）</span>
+            <div id="owner-filter-tags" class="filter-tags" role="group" aria-label="管理员筛选"></div>
+          </div>
         </div>
       </section>
 
       <section class="panel panel-actions">
         <div class="actions-left">
-          <button id="search-btn" class="btn btn-primary" type="button"><i class="ri ri-search-line" aria-hidden="true"></i><span class="btn-label">搜索</span></button>
           <button id="refresh-btn" class="btn" type="button"><i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span></button>
           <button id="select-all-btn" class="btn" type="button"><i class="ri ri-checkbox-multiple-line" aria-hidden="true"></i><span class="btn-label">全选本页</span></button>
-          <button id="download-btn" class="btn" type="button" disabled><i class="ri ri-download-2-line" aria-hidden="true"></i><span class="btn-label">下载选中</span></button>
+          <button id="download-btn" class="btn" type="button" disabled><i class="ri ri-download-2-line" aria-hidden="true"></i><span class="btn-label">同步选中会议</span></button>
           <button id="batch-summary-btn" class="btn" type="button" disabled><i class="ri ri-article-line" aria-hidden="true"></i><span class="btn-label">生成纪要</span></button>
           <button id="share-selected-btn" class="btn" type="button" disabled><i class="ri ri-share-forward-line" aria-hidden="true"></i><span class="btn-label">分享选中</span></button>
         </div>
@@ -169,8 +186,8 @@
   </div>
 
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/admin-shell.js?v=20260805-sidebar"></script>
-  <script defer src="/assets/common.js?v=20260805-thinking"></script>
-  <script defer src="/assets/list.js?v=20260805-thinking"></script>
+  <script defer src="/assets/common.js?v=20260806-ticket-30m"></script>
+  <script defer src="/assets/admin-shell.js?v=20260806-tags"></script>
+  <script defer src="/assets/list.js?v=20260806-batch-owner"></script>
 </body>
 </html>
