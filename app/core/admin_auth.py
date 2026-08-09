@@ -18,6 +18,7 @@ _PUBLIC_EXACT = {
     "/api/v1/auth/login",
     "/api/v1/auth/register",
     "/api/v1/auth/super/login",
+    "/api/v1/auth/feishu/sso-exchange",
 }
 _PUBLIC_PREFIXES = (
     "/api/v1/auth/feishu/login",

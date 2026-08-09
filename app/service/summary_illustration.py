@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import settings
+from app.core import runtime_config
 from app.integrations.llm.messages_client import LlmClient, LlmImage
 from app.integrations.video.ffmpeg_client import FfmpegClient, VideoInfo
 from app.service.frame_selection import (
@@ -45,8 +45,8 @@ def figure_limit_for_duration(duration_seconds: float) -> int:
     规则：一小时以内最多 first_hour 张；之后每多半小时多 per 张，
     不足半小时按半小时算（向上取整）。
     """
-    base = max(1, settings.summary_figures_first_hour)
-    per = max(0, settings.summary_figures_per_extra_half_hour)
+    base = max(1, runtime_config.get_int("SUMMARY_FIGURES_FIRST_HOUR", 20))
+    per = max(0, runtime_config.get_int("SUMMARY_FIGURES_PER_EXTRA_HALF_HOUR", 6))
     if duration_seconds <= 0:
         return base
     if duration_seconds <= 3600:
@@ -418,7 +418,7 @@ class SummaryIllustrationService:
         work_dir: Path,
         index: int,
     ) -> list[FrameStats]:
-        offsets = settings.frame_burst_offset_list
+        offsets = runtime_config.frame_burst_offset_list()
         burst = await self._ffmpeg.extract_burst(
             video.path,
             float(item.seconds),
@@ -441,7 +441,7 @@ class SummaryIllustrationService:
         retry = await self._ffmpeg.extract_burst(
             video.path,
             float(item.seconds),
-            FALLBACK_OFFSETS[: settings.frame_regrab_limit],
+            FALLBACK_OFFSETS[: runtime_config.get_int("FRAME_REGRAB_LIMIT", 3)],
             work_dir,
             f"cand{index:02d}r",
             duration_limit=video.duration_seconds,

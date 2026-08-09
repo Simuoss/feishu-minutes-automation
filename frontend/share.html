@@ -7,96 +7,178 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260805-thinking" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260809-share-lib" />
 </head>
-<body>
-  <div id="app">
-    <header class="header">
-      <div class="header-main">
-        <div>
-          <h1>飞书妙记</h1>
-          <p class="subtitle">分享查看</p>
+<body class="share-body">
+  <div id="app" class="share-shell">
+    <aside class="share-sidebar" aria-label="可访问课程列表">
+      <div class="share-sidebar-head">
+        <div class="share-sidebar-title-row">
+          <strong>可访问课程</strong>
+          <button
+            id="share-library-refresh"
+            class="btn btn-sm"
+            type="button"
+            title="刷新列表"
+          >
+            <i class="ri ri-refresh-line" aria-hidden="true"></i>
+          </button>
         </div>
-        <div class="header-actions">
-          <a class="btn btn-sm" href="/my-shares.html"><i class="ri ri-bookmark-3-line" aria-hidden="true"></i><span class="btn-label">我的分享</span></a>
-        </div>
-      </div>
-    </header>
-
-    <main id="unlock-view" class="view hidden">
-      <section class="panel login-card" style="max-width: 420px; margin: 2rem auto;">
-        <h2 class="panel-title">需要密钥访问</h2>
-        <p id="unlock-title" class="subtitle"></p>
-        <label class="field field-wide">
-          <span>访问密钥</span>
-          <input id="share-key-input" type="password" placeholder="sk_…" autocomplete="current-password" />
+        <p class="share-sidebar-sub">本机密钥有权限访问的分享</p>
+        <label class="field field-wide share-library-filter-field">
+          <span class="sr-only">筛选课程</span>
+          <input
+            id="share-library-filter"
+            type="search"
+            placeholder="按名称筛选"
+            autocomplete="off"
+          />
         </label>
-        <label class="field field-wide modal-check">
-          <input id="share-remember-key" type="checkbox" checked />
-          <span>记住密钥到本机列表（打开分享时自动尝试）</span>
-        </label>
-        <p id="unlock-error" class="login-error hidden"></p>
-        <button id="unlock-btn" class="btn btn-primary" type="button"><i class="ri ri-lock-unlock-line" aria-hidden="true"></i><span class="btn-label">解锁</span></button>
-        <p class="meeting-meta" style="margin-top: 0.75rem;">
-          <a href="/my-shares.html">查看本机密钥可访问的全部分享</a>
-        </p>
-      </section>
-    </main>
-
-    <main id="detail-view" class="view hidden">
-      <div class="detail-header">
-        <h2 id="detail-title"></h2>
-        <p id="detail-meta" class="detail-meta"></p>
       </div>
-      <section id="media-section" class="media-section hidden">
-        <h3>本地音视频</h3>
-        <div id="media-players" class="media-players"></div>
-      </section>
-      <div id="detail-tabs" class="detail-tabs hidden">
-        <button class="tab-btn is-active" data-tab="summary" type="button"><i class="ri ri-article-line" aria-hidden="true"></i><span>课程纪要</span></button>
-        <button class="tab-btn" data-tab="transcript" type="button"><i class="ri ri-chat-quote-line" aria-hidden="true"></i><span>转写全文</span></button>
+      <div id="share-library-status" class="share-library-status">加载中…</div>
+      <ul id="share-library-list" class="share-library-list"></ul>
+      <div class="share-sidebar-foot">
+        <a class="btn btn-sm" href="/my-shares.html"
+          ><i class="ri ri-key-2-line" aria-hidden="true"></i
+          ><span class="btn-label">管理本机密钥</span></a
+        >
       </div>
+    </aside>
 
-      <section id="summary-pane" class="tab-pane hidden">
-        <div class="summary-toolbar">
-          <div id="summary-export" class="export-group hidden">
-            <button class="btn btn-sm" type="button" data-export-summary="pdf"><i class="ri ri-file-pdf-2-line" aria-hidden="true"></i><span class="btn-label">PDF</span></button>
-            <button class="btn btn-sm" type="button" data-export-summary="docx"><i class="ri ri-file-word-2-line" aria-hidden="true"></i><span class="btn-label">DOCX</span></button>
-            <button class="btn btn-sm" type="button" data-export-summary="md"><i class="ri ri-markdown-line" aria-hidden="true"></i><span class="btn-label">MD</span></button>
+    <div class="share-main">
+      <header class="header">
+        <div class="header-main">
+          <div>
+            <h1>飞书妙记</h1>
+            <p class="subtitle">分享查看</p>
           </div>
-          <span id="summary-meta" class="summary-meta"></span>
+          <div class="header-actions">
+            <a class="btn btn-sm" href="/my-shares.html"
+              ><i class="ri ri-bookmark-3-line" aria-hidden="true"></i
+              ><span class="btn-label">我的分享</span></a
+            >
+          </div>
         </div>
-        <p id="summary-empty" class="summary-empty">暂无纪要</p>
-        <article id="summary-content" class="summary-content"></article>
-      </section>
+      </header>
 
-      <section id="transcript-pane" class="tab-pane hidden">
-        <div id="sync-toolbar" class="sync-toolbar hidden">
-          <button id="scroll-mode-btn" class="btn btn-sm" type="button"><i class="ri ri-focus-3-line" aria-hidden="true"></i><span class="btn-label">跟随模式</span></button>
-          <span id="sync-hint" class="sync-hint">播放或拖动进度条时，转写自动滚动到对应位置</span>
+      <main id="unlock-view" class="view hidden">
+        <section class="panel login-card share-unlock-card">
+          <h2 class="panel-title">需要密钥访问</h2>
+          <p id="unlock-title" class="subtitle"></p>
+          <label class="field field-wide">
+            <span>访问密钥</span>
+            <input
+              id="share-key-input"
+              type="password"
+              placeholder="sk_…"
+              autocomplete="current-password"
+            />
+          </label>
+          <label class="field field-wide modal-check">
+            <input id="share-remember-key" type="checkbox" checked />
+            <span>记住密钥到本机（解锁后左侧列出该密钥可访问的课程）</span>
+          </label>
+          <p id="unlock-error" class="login-error hidden"></p>
+          <p class="meeting-meta unlock-hint">
+            密钥由分享发送者提供；若提示过期或吊销，请向对方索取新密钥。
+          </p>
+          <button id="unlock-btn" class="btn btn-primary" type="button">
+            <i class="ri ri-lock-unlock-line" aria-hidden="true"></i
+            ><span class="btn-label">解锁</span>
+          </button>
+        </section>
+      </main>
+
+      <main id="detail-view" class="view hidden">
+        <div class="detail-header">
+          <h2 id="detail-title"></h2>
+          <p id="detail-meta" class="detail-meta"></p>
+          <p id="resume-hint" class="resume-hint hidden"></p>
         </div>
-        <div id="transcript-section" class="transcript-section hidden">
-          <div class="transcript-header">
-            <h3>转写文本</h3>
-            <div id="transcript-export" class="export-group hidden">
-              <button class="btn btn-sm" type="button" data-export-transcript="md"><i class="ri ri-markdown-line" aria-hidden="true"></i><span class="btn-label">MD</span></button>
-              <button class="btn btn-sm" type="button" data-export-transcript="txt"><i class="ri ri-file-text-line" aria-hidden="true"></i><span class="btn-label">TXT</span></button>
+        <section id="media-section" class="media-section hidden">
+          <h3>本地音视频</h3>
+          <div id="media-players" class="media-players"></div>
+        </section>
+        <div id="detail-tabs" class="detail-tabs hidden">
+          <button class="tab-btn is-active" data-tab="summary" type="button">
+            <i class="ri ri-article-line" aria-hidden="true"></i><span>课程纪要</span>
+          </button>
+          <button class="tab-btn" data-tab="transcript" type="button">
+            <i class="ri ri-chat-quote-line" aria-hidden="true"></i
+            ><span>转写全文</span>
+          </button>
+        </div>
+
+        <section id="summary-pane" class="tab-pane hidden">
+          <div class="summary-toolbar">
+            <div id="summary-export" class="export-group hidden">
+              <button class="btn btn-sm" type="button" data-export-summary="pdf">
+                <i class="ri ri-file-pdf-2-line" aria-hidden="true"></i
+                ><span class="btn-label">PDF</span>
+              </button>
+              <button class="btn btn-sm" type="button" data-export-summary="docx">
+                <i class="ri ri-file-word-2-line" aria-hidden="true"></i
+                ><span class="btn-label">DOCX</span>
+              </button>
+              <button class="btn btn-sm" type="button" data-export-summary="md">
+                <i class="ri ri-markdown-line" aria-hidden="true"></i
+                ><span class="btn-label">MD</span>
+              </button>
             </div>
+            <span id="summary-meta" class="summary-meta"></span>
           </div>
-          <div id="transcript-scroll" class="transcript-scroll"></div>
-        </div>
-      </section>
+          <p id="summary-empty" class="summary-empty">暂无纪要</p>
+          <article id="summary-content" class="summary-content"></article>
+        </section>
 
-      <p id="detail-empty" class="empty hidden">暂无内容</p>
-    </main>
+        <section id="transcript-pane" class="tab-pane hidden">
+          <div id="sync-toolbar" class="sync-toolbar hidden">
+            <button id="scroll-mode-btn" class="btn btn-sm" type="button">
+              <i class="ri ri-focus-3-line" aria-hidden="true"></i
+              ><span class="btn-label">跟随模式</span>
+            </button>
+            <span id="sync-hint" class="sync-hint"
+              >播放或拖动进度条时，转写自动滚动到对应位置</span
+            >
+          </div>
+          <div id="transcript-section" class="transcript-section hidden">
+            <div class="transcript-header">
+              <h3>转写文本</h3>
+              <div id="transcript-export" class="export-group hidden">
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  data-export-transcript="md"
+                >
+                  <i class="ri ri-markdown-line" aria-hidden="true"></i
+                  ><span class="btn-label">MD</span>
+                </button>
+                <button
+                  class="btn btn-sm"
+                  type="button"
+                  data-export-transcript="txt"
+                >
+                  <i class="ri ri-file-text-line" aria-hidden="true"></i
+                  ><span class="btn-label">TXT</span>
+                </button>
+              </div>
+            </div>
+            <div id="transcript-scroll" class="transcript-scroll"></div>
+          </div>
+        </section>
+
+        <p id="detail-empty" class="empty hidden">暂无内容</p>
+      </main>
+    </div>
   </div>
 
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/common.js?v=20260805-thinking"></script>
+  <script defer src="/assets/common.js?v=20260809-time-fmt"></script>
   <script defer src="/assets/share-storage.js?v=20260805-sameorigin"></script>
   <script defer src="/assets/vendor/marked.min.js"></script>
   <script defer src="/assets/vendor/purify.min.js"></script>
-  <script defer src="/assets/safe-markdown.js?v=20260806-safe-md"></script>
-  <script defer src="/assets/share.js?v=20260806-safe-md"></script>
+  <script defer src="/assets/safe-markdown.js?v=20260806-safe-md2"></script>
+  <script defer src="/assets/passage-ask.js?v=20260806-passage-ask4"></script>
+  <script defer src="/assets/share.js?v=20260809-share-lib4"></script>
 </body>
 </html>

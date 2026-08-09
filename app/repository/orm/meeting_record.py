@@ -29,6 +29,8 @@ class MeetingRecordORM(Base):
     transcript_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
     downloaded_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     storage_root_relpath: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # JSON 数组字符串：转写中解析出的发言人去重列表
+    speakers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

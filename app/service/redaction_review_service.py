@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from app.core.async_bridge import run_async
-from app.core.config import settings
+from app.core import runtime_config
 from app.service.figure_audit import parse_regions_from_request
 from app.service.image_mosaic import mosaic_file
 from app.service.meeting_storage_service import MeetingStorageService
@@ -109,7 +109,7 @@ class RedactionReviewService:
             original,
             dest,
             mosaic_regions,
-            block_size=settings.summary_redact_mosaic_block,
+            block_size=runtime_config.get_int("SUMMARY_REDACT_MOSAIC_BLOCK", 12),
         )
 
         audit = self.read_audit(minute_token, owner_user_id=owner_user_id) or {

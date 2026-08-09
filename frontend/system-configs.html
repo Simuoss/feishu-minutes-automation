@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>系统配置 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260806-filters-config" />
+</head>
+<body class="admin-body" data-admin-page="system-configs">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+      <header class="header admin-header">
+        <div class="header-main">
+          <div>
+            <h1>系统配置</h1>
+            <p class="subtitle">超级管理端 · 业务开关与阈值（密钥仍在 .env）</p>
+          </div>
+          <button id="refresh-configs-btn" class="btn btn-sm" type="button">
+            <i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="view">
+        <section class="panel">
+          <div id="configs-status" class="status"></div>
+          <div id="configs-table-wrap" class="users-table-wrap">
+            <table class="users-table" aria-label="系统配置">
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>描述</th>
+                  <th>Value</th>
+                  <th>备注</th>
+                  <th>更新时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="configs-tbody"></tbody>
+            </table>
+          </div>
+          <p id="configs-empty" class="empty hidden">暂无配置项</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260806-feishu-sso"></script>
+  <script defer src="/assets/admin-shell.js?v=20260806-filters-config"></script>
+  <script defer src="/assets/system-configs.js?v=20260806-filters-config"></script>
+</body>
+</html>

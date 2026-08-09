@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.core.jwt_auth import issue_super_admin_token, issue_user_token
 from app.core.password import hash_password, verify_password
 from app.data_model.entity.invite_code import InviteCodeCreateEntity, InviteCodeQueryEntity
-from app.data_model.entity.user import UserCreateEntity
+from app.data_model.entity.user import UserCreateEntity, UserUpdateEntity
 from app.repository.uow import UnitOfWork
 from app.service.admin_ticket_store import TICKET_TTL_MS, admin_ticket_store
 from app.service.time_utils import utc_now_ms
@@ -81,6 +81,26 @@ class InviteCheckResponse(BaseModel):
     status: str | None = None
 
 
+class MeResponse(BaseModel):
+    user_id: int
+    username: str
+    display_name: str
+    has_password: bool
+    feishu_bound: bool
+    feishu_name: str | None = None
+    feishu_avatar_url: str | None = None
+    needs_display_name_setup: bool = False
+
+
+class MeUpdateRequest(BaseModel):
+    display_name: str
+
+
+class SetPasswordRequest(BaseModel):
+    password: str
+    old_password: str | None = None
+
+
 def _invite_url(code: str) -> str:
     base = (settings.frontend_origin or "").rstrip("/")
     return f"{base}/register.html?invite={code}"
@@ -118,6 +138,11 @@ async def user_login(body: LoginRequest) -> AuthTokenResponse:
         user = await uow.users.get_by_username(username)
         if user is None or user.status != "ACTIVE" or user.id is None:
             raise HTTPException(status_code=401, detail="用户名或密码错误")
+        if not user.has_password():
+            raise HTTPException(
+                status_code=401,
+                detail="该账号未设置密码，请使用飞书登录或先在账号设置中设置密码",
+            )
         if not verify_password(password, user.password_hash):
             raise HTTPException(status_code=401, detail="用户名或密码错误")
         token = issue_user_token(user_id=user.id, username=user.username)
@@ -126,7 +151,7 @@ async def user_login(body: LoginRequest) -> AuthTokenResponse:
             message="登录成功",
             token=token,
             role="USER",
-            username=user.username,
+            username=user.public_display_name(),
             user_id=user.id,
         )
 
@@ -158,6 +183,8 @@ async def register(body: RegisterRequest) -> AuthTokenResponse:
                 status="ACTIVE",
                 created_at=now,
                 updated_at=now,
+                display_name=username,
+                display_name_set_at=now,
             )
         )
         if user.id is None:
@@ -196,6 +223,94 @@ async def super_login(body: SuperLoginRequest) -> AuthTokenResponse:
         role="SUPER_ADMIN",
         username=None,
         user_id=None,
+    )
+
+
+@router.get("/me", response_model=MeResponse)
+async def get_me(request: Request) -> MeResponse:
+    user_id = require_user_id(request)
+    async with UnitOfWork() as uow:
+        assert uow.users is not None
+        user = await uow.users.get_by_id(user_id)
+    if user is None or user.status != "ACTIVE":
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return MeResponse(
+        user_id=user_id,
+        username=user.username,
+        display_name=user.public_display_name(),
+        has_password=user.has_password(),
+        feishu_bound=bool(user.feishu_open_id),
+        feishu_name=user.feishu_name,
+        feishu_avatar_url=user.feishu_avatar_url,
+        needs_display_name_setup=user.display_name_set_at is None,
+    )
+
+
+@router.patch("/me", response_model=MeResponse)
+async def patch_me(body: MeUpdateRequest, request: Request) -> MeResponse:
+    user_id = require_user_id(request)
+    name = (body.display_name or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(status_code=422, detail="显示名需为 1–64 个字符")
+    now = utc_now_ms()
+    async with UnitOfWork() as uow:
+        assert uow.users is not None
+        updated = await uow.users.update(
+            UserUpdateEntity(
+                id=user_id,
+                display_name=name,
+                display_name_set_at=now,
+                updated_at=now,
+            )
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        await uow.commit()
+    return MeResponse(
+        user_id=user_id,
+        username=updated.username,
+        display_name=updated.public_display_name(),
+        has_password=updated.has_password(),
+        feishu_bound=bool(updated.feishu_open_id),
+        feishu_name=updated.feishu_name,
+        feishu_avatar_url=updated.feishu_avatar_url,
+        needs_display_name_setup=False,
+    )
+
+
+@router.post("/me/password", response_model=MeResponse)
+async def set_password(body: SetPasswordRequest, request: Request) -> MeResponse:
+    user_id = require_user_id(request)
+    password = _validate_password(body.password)
+    now = utc_now_ms()
+    async with UnitOfWork() as uow:
+        assert uow.users is not None
+        user = await uow.users.get_by_id(user_id)
+        if user is None or user.status != "ACTIVE":
+            raise HTTPException(status_code=404, detail="用户不存在")
+        if user.has_password():
+            old = body.old_password or ""
+            if not verify_password(old, user.password_hash):
+                raise HTTPException(status_code=401, detail="原密码不正确")
+        updated = await uow.users.update(
+            UserUpdateEntity(
+                id=user_id,
+                password_hash=hash_password(password),
+                updated_at=now,
+            )
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        await uow.commit()
+    return MeResponse(
+        user_id=user_id,
+        username=updated.username,
+        display_name=updated.public_display_name(),
+        has_password=True,
+        feishu_bound=bool(updated.feishu_open_id),
+        feishu_name=updated.feishu_name,
+        feishu_avatar_url=updated.feishu_avatar_url,
+        needs_display_name_setup=updated.display_name_set_at is None,
     )
 
 

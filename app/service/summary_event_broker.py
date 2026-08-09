@@ -48,7 +48,9 @@ class SummaryChannel:
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        from app.service.llm_call_pool import llm_call_pool
+
+        payload = {
             "minute_token": self.minute_token,
             "owner_user_id": self.owner_user_id,
             "status": self.status,
@@ -60,6 +62,8 @@ class SummaryChannel:
             "error_message": self.error_message,
             "updated_at": self.updated_at,
         }
+        payload.update(llm_call_pool.stats())
+        return payload
 
 
 class BoundSummaryBroker:

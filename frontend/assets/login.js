@@ -1,6 +1,21 @@
 const params = new URLSearchParams(location.search);
 const next = params.get("next") || "/";
 
+if (params.get("auth") === "error") {
+  const err = $("#login-error");
+  let message = params.get("msg") || "飞书登录失败";
+  try {
+    message = decodeURIComponent(message);
+  } catch {
+    /* keep */
+  }
+  if (err) {
+    err.textContent = message;
+    err.classList.remove("hidden");
+  }
+  history.replaceState({}, "", location.pathname);
+}
+
 async function tryLogin() {
   const userInput = $("#admin-username-input");
   const passInput = $("#admin-password-input");
@@ -38,11 +53,16 @@ async function tryLogin() {
   location.replace(next.startsWith("/") ? next : "/");
 }
 
+function startFeishuSso() {
+  location.href = feishuLoginUrl();
+}
+
 if (getUserJwt()) {
   location.replace(next.startsWith("/") ? next : "/");
 }
 
 $("#login-btn").addEventListener("click", tryLogin);
+$("#feishu-sso-btn")?.addEventListener("click", startFeishuSso);
 ["#admin-username-input", "#admin-password-input"].forEach((sel) => {
   const el = $(sel);
   if (!el) return;
@@ -50,4 +70,4 @@ $("#login-btn").addEventListener("click", tryLogin);
     if (e.key === "Enter") tryLogin();
   });
 });
-$("#admin-username-input")?.focus();
+$("#feishu-sso-btn")?.focus();

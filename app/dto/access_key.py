@@ -26,13 +26,26 @@ class AccessKeyListResponse(BaseModel):
 
 class ShareAccessLogResponse(BaseModel):
     id: int
-    access_key_id: int
+    access_key_id: int | None = None
     share_id: int
     minute_token: str
+    meeting_title: str | None = None
     action: str
     ip: str | None = None
     user_agent: str | None = None
     created_at: int
+    session_id: str | None = None
+    referer: str | None = None
+    device_type: str | None = None
+    browser: str | None = None
+    os: str | None = None
+    started_at: int | None = None
+    ended_at: int | None = None
+    dwell_ms: int | None = None
+    video_progress_pct: int | None = None
+    result: str | None = None
+    fail_reason: str | None = None
+    detail_json: str | None = None
 
 
 class ShareAccessLogListResponse(BaseModel):

@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260806-tags" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260806-share-ux" />
 </head>
 <body class="admin-body" data-admin-page="meetings">
   <div id="app" class="admin-shell">
@@ -54,6 +54,24 @@
             <span>结束时间</span>
             <input id="end-time" type="datetime-local" />
           </label>
+          <div class="field">
+            <span>状态（可多选）</span>
+            <div
+              id="status-filter"
+              class="multi-select"
+              data-placeholder="选择状态…"
+              aria-label="状态筛选"
+            ></div>
+          </div>
+          <div class="field">
+            <span>参会人员（可多选）</span>
+            <div
+              id="speaker-filter"
+              class="multi-select"
+              data-placeholder="选择参会人员…"
+              aria-label="参会人员筛选"
+            ></div>
+          </div>
           <label class="field">
             <span>最短时长（分）</span>
             <input id="min-duration" type="number" min="0" step="1" placeholder="不限" />
@@ -62,17 +80,6 @@
             <span>最长时长（分）</span>
             <input id="max-duration" type="number" min="0" step="1" placeholder="不限" />
           </label>
-          <div class="field field-wide">
-            <span>状态（可多选）</span>
-            <div id="status-filter-tags" class="filter-tags" role="group" aria-label="状态筛选">
-              <button type="button" class="filter-tag" data-status="UNSYNCED">未同步</button>
-              <button type="button" class="filter-tag" data-status="SYNCING">同步中</button>
-              <button type="button" class="filter-tag" data-status="SYNCED">已同步</button>
-              <button type="button" class="filter-tag" data-status="NO_SUMMARY">未生成纪要</button>
-              <button type="button" class="filter-tag" data-status="SUMMARY_GENERATING">生成纪要中</button>
-              <button type="button" class="filter-tag" data-status="HAS_SUMMARY">有纪要</button>
-            </div>
-          </div>
           <div id="owner-filter-field" class="field field-wide hidden">
             <span>管理员（可多选）</span>
             <div id="owner-filter-tags" class="filter-tags" role="group" aria-label="管理员筛选"></div>
@@ -185,9 +192,24 @@
     </div>
   </div>
 
+  <div id="share-batch-result-dialog" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-batch-result></div>
+    <div class="modal-card modal-card-wide">
+      <h3 class="modal-title">分享结果</h3>
+      <p id="share-batch-result-msg" class="modal-msg"></p>
+      <div id="share-batch-result-card"></div>
+      <ul id="share-batch-result-list" class="share-batch-result-list"></ul>
+      <div class="modal-actions">
+        <button id="share-batch-copy-all" class="btn btn-primary" type="button"><i class="ri ri-file-copy-line" aria-hidden="true"></i><span class="btn-label">复制全部链接</span></button>
+        <button class="btn" type="button" data-close-batch-result><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">关闭</span></button>
+      </div>
+    </div>
+  </div>
+
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/common.js?v=20260806-ticket-30m"></script>
-  <script defer src="/assets/admin-shell.js?v=20260806-tags"></script>
-  <script defer src="/assets/list.js?v=20260806-batch-owner"></script>
+  <script defer src="/assets/common.js?v=20260806-share-ux"></script>
+  <script defer src="/assets/admin-shell.js?v=20260806-filters-config"></script>
+  <script defer src="/assets/vendor/qrcode.min.js"></script>
+  <script defer src="/assets/list.js?v=20260806-llm-pool-hint"></script>
 </body>
 </html>

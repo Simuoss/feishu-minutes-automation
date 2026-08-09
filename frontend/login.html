@@ -7,13 +7,16 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260805-auth" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260806-feishu-sso" />
 </head>
 <body>
   <div id="app" class="login-page">
     <main class="login-card">
       <h1>飞书妙记</h1>
-      <p class="subtitle">使用用户名与密码登录管理端</p>
+      <p class="subtitle">飞书登录将同时授权妙记权限；也可使用用户名密码</p>
+      <p id="login-error" class="login-error hidden"></p>
+      <button id="feishu-sso-btn" class="btn btn-primary" type="button"><i class="ri ri-flashlight-line" aria-hidden="true"></i><span class="btn-label">飞书登录 / 注册</span></button>
+      <div class="login-divider" aria-hidden="true"><span>或</span></div>
       <label class="field field-wide">
         <span>用户名</span>
         <input id="admin-username-input" type="text" autocomplete="username" placeholder="用户名" />
@@ -22,14 +25,12 @@
         <span>密码</span>
         <input id="admin-password-input" type="password" autocomplete="current-password" placeholder="密码" />
       </label>
-      <p id="login-error" class="login-error hidden"></p>
-      <button id="login-btn" class="btn btn-primary" type="button"><i class="ri ri-login-box-line" aria-hidden="true"></i><span class="btn-label">登录</span></button>
-      <button id="feishu-sso-btn" class="btn btn-ghost" type="button" disabled title="即将支持"><i class="ri ri-flashlight-line" aria-hidden="true"></i><span class="btn-label">飞书 SSO（即将支持）</span></button>
-      <p class="login-foot">没有账号？需要邀请链接才能 <a href="/register.html">注册</a></p>
+      <button id="login-btn" class="btn" type="button"><i class="ri ri-login-box-line" aria-hidden="true"></i><span class="btn-label">密码登录</span></button>
+      <p class="login-foot">没有账号？可用飞书直接登录，或持邀请链接 <a href="/register.html">密码注册</a></p>
     </main>
   </div>
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/common.js?v=20260805-auth"></script>
-  <script defer src="/assets/login.js?v=20260805-auth"></script>
+  <script defer src="/assets/common.js?v=20260806-feishu-sso"></script>
+  <script defer src="/assets/login.js?v=20260806-feishu-sso"></script>
 </body>
 </html>

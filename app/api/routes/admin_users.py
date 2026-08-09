@@ -22,17 +22,22 @@ router = APIRouter(prefix="/admin/users", tags=["admin-users"])
 class AdminUserItemResponse(BaseModel):
     id: int
     username: str
+    display_name: str
     status: str
     created_at: int
     updated_at: int
     created_at_text: str
     updated_at_text: str
     meeting_count: int = 0
+    total_duration_ms: int = 0
+    total_duration_hours: float = 0.0
+    total_duration_text: str = "0"
     share_count: int = 0
     access_key_count: int = 0
     invites_created: int = 0
     invites_redeemed: int = 0
     feishu_authorized: bool = False
+    feishu_bound: bool = False
 
 
 class AdminUserListResponse(BaseModel):
@@ -49,6 +54,16 @@ def _ms_text(ms: int) -> str:
     )
 
 
+def _duration_hours_text(total_ms: int) -> tuple[float, str]:
+    """累计时长：小时数（一位小数）+ 展示文案。"""
+    if total_ms <= 0:
+        return 0.0, "0"
+    hours = round(total_ms / 3_600_000, 1)
+    if hours == int(hours):
+        return float(int(hours)), f"{int(hours)}"
+    return hours, f"{hours}"
+
+
 @router.get("", response_model=AdminUserListResponse)
 async def list_users(request: Request) -> AdminUserListResponse:
     require_super_admin(request)
@@ -58,10 +73,32 @@ async def list_users(request: Request) -> AdminUserListResponse:
         users = await uow.users.list_all()
         session = uow._session
 
+        # 会议/课时：只计 COMPLETED，并按 minute_token 去重（与列表口径一致）
         meeting_rows = (
             await session.execute(
-                select(MeetingRecordORM.owner_user_id, func.count())
-                .where(MeetingRecordORM.owner_user_id.is_not(None))
+                select(
+                    MeetingRecordORM.owner_user_id,
+                    func.count(func.distinct(MeetingRecordORM.minute_token)),
+                )
+                .where(
+                    MeetingRecordORM.owner_user_id.is_not(None),
+                    MeetingRecordORM.minute_token.is_not(None),
+                    MeetingRecordORM.status == "COMPLETED",
+                )
+                .group_by(MeetingRecordORM.owner_user_id)
+            )
+        ).all()
+        duration_rows = (
+            await session.execute(
+                select(
+                    MeetingRecordORM.owner_user_id,
+                    func.coalesce(func.sum(MeetingRecordORM.duration_ms), 0),
+                )
+                .where(
+                    MeetingRecordORM.owner_user_id.is_not(None),
+                    MeetingRecordORM.duration_ms.is_not(None),
+                    MeetingRecordORM.status == "COMPLETED",
+                )
                 .group_by(MeetingRecordORM.owner_user_id)
             )
         ).all()
@@ -104,6 +141,9 @@ async def list_users(request: Request) -> AdminUserListResponse:
         ).scalars().all()
 
     meetings = {int(uid): int(n) for uid, n in meeting_rows if uid is not None}
+    durations = {
+        int(uid): int(total or 0) for uid, total in duration_rows if uid is not None
+    }
     shares = {int(uid): int(n) for uid, n in share_rows if uid is not None}
     keys = {int(uid): int(n) for uid, n in key_rows if uid is not None}
     invites_c = {int(uid): int(n) for uid, n in invite_created_rows if uid is not None}
@@ -117,21 +157,28 @@ async def list_users(request: Request) -> AdminUserListResponse:
         if user.id is None:
             continue
         uid = user.id
+        total_ms = durations.get(uid, 0)
+        hours, hours_text = _duration_hours_text(total_ms)
         items.append(
             AdminUserItemResponse(
                 id=uid,
                 username=user.username,
+                display_name=user.public_display_name(),
                 status=user.status,
                 created_at=user.created_at,
                 updated_at=user.updated_at,
                 created_at_text=_ms_text(user.created_at),
                 updated_at_text=_ms_text(user.updated_at),
                 meeting_count=meetings.get(uid, 0),
+                total_duration_ms=total_ms,
+                total_duration_hours=hours,
+                total_duration_text=hours_text,
                 share_count=shares.get(uid, 0),
                 access_key_count=keys.get(uid, 0),
                 invites_created=invites_c.get(uid, 0),
                 invites_redeemed=invites_r.get(uid, 0),
                 feishu_authorized=uid in feishu_ids,
+                feishu_bound=bool(user.feishu_open_id),
             )
         )
     return AdminUserListResponse(items=items, total=len(items))

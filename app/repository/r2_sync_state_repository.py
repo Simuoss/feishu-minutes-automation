@@ -16,6 +16,7 @@ def _to_entity(orm: R2SyncStateORM) -> R2SyncStateEntity:
         video_status=orm.video_status,
         video_updated_at=orm.video_updated_at,
         assets=load_json_dict(orm.assets_json),
+        text=load_json_dict(orm.text_json),
         updated_at=orm.updated_at,
     )
 
@@ -53,6 +54,7 @@ class R2SyncStateRepository:
         orm.video_status = entity.video_status
         orm.video_updated_at = entity.video_updated_at
         orm.assets_json = dump_json(entity.assets, default="{}")
+        orm.text_json = dump_json(entity.text, default="{}")
         orm.updated_at = entity.updated_at
         await self._session.flush()
         await self._session.refresh(orm)

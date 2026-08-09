@@ -8,6 +8,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ---------- 常驻 .env（不进配置表）----------
     feishu_app_id: str
     feishu_app_secret: str
 
@@ -45,17 +46,31 @@ class Settings(BaseSettings):
         "minutes:minutes.search:read minutes:minutes.basic:read "
         "minutes:minutes.media:export minutes:minutes.transcript:export offline_access"
     )
+    # 飞书 SSO 建号是否强制邀请码（当前默认关闭，预留开关）
+    feishu_sso_require_invite: bool = False
 
     # step-explore 走 Step Plan 通道；SDK/自拼路径都会再接 /v1/messages
     llm_base_url: str = "https://api.stepfun.com/step_plan"
     llm_api_key: str = ""
     llm_model: str = "step-explore"
+
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
+
+    # Cloudflare R2：密钥与桶常驻 .env；画质/TTL 见下方种子项
+    r2_enabled: bool = False
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket: str = ""
+
+    # ---------- 配置表种子（首次写入 system_configs；运行时以 runtime_config 为准）----------
     # 0 表示不人为截断，请求时按平台允许的上限发送
     llm_max_tokens: int = 0
     llm_timeout_seconds: float = 600.0
     llm_max_attempts: int = 5
-    # 纪要生成本质是大模型调用，并发过高容易 429
-    llm_concurrency: int = 4
+    # 全局大模型 HTTP 调用并发（纪要/脱敏/挑图/答疑等共用）；过高易 429
+    llm_concurrency: int = 20
 
     # 妙记下载队列并发（媒体 + 转写拉取）
     download_concurrency: int = 5
@@ -78,8 +93,6 @@ class Settings(BaseSettings):
     # 马赛克像素块边长（越大越糊）；区域会再外扩约 2%
     summary_redact_mosaic_block: int = 12
 
-    ffmpeg_path: str = "ffmpeg"
-    ffprobe_path: str = "ffprobe"
     frame_max_width: int = 1920
     # ffmpeg -q:v，2 最好 31 最差；讲课录屏多是文字，画质不能压太狠
     frame_jpeg_quality: int = 3
@@ -87,18 +100,15 @@ class Settings(BaseSettings):
     frame_burst_offsets: str = "-2,1,4,8"
     frame_regrab_limit: int = 3
 
-    # Cloudflare R2：本地双写配图 + 分享页压缩视频；关闭时分享页回退本地
-    r2_enabled: bool = False
-    r2_account_id: str = ""
-    r2_access_key_id: str = ""
-    r2_secret_access_key: str = ""
-    r2_bucket: str = ""
     r2_signed_url_ttl_seconds: int = 7200
     r2_video_crf: int = 32
     r2_video_max_height: int = 720
     r2_video_preset: str = "veryfast"
     # 压缩超时上限（秒）；长课可能很久，默认 6 小时
     r2_video_compress_timeout_seconds: float = 21600.0
+
+    # 导出 PDF/DOCX 水印文案；空字符串表示不加水印
+    export_watermark_text: str = ""
 
     @property
     def r2_endpoint(self) -> str:

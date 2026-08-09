@@ -6,13 +6,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.core.config import settings
+from app.core import runtime_config
 from app.integrations.llm.messages_client import LlmClient, LlmImage, LlmRequestError
 from app.service.image_mosaic import MosaicRegion, mosaic_file, normalize_region
 from app.service.summary_illustration import PreparedFigure, extract_json_object
@@ -263,16 +264,56 @@ class FigureRedactionService:
         figures: list[PreparedFigure],
         *,
         on_attempt: Callable[[int, int], None] | None = None,
+        on_stage: Callable[[str], None] | None = None,
     ) -> dict[str, FigureScanItem]:
-        """分批扫描全部候选图，返回 figure_id -> 扫描结果。"""
+        """分批扫描全部候选图；各批并发发起，由全局 llm_call_pool 限流。"""
         if not figures:
             return {}
 
-        batch_size = max(1, settings.summary_figure_batch_size)
-        merged: dict[str, FigureScanItem] = {}
-        for start in range(0, len(figures), batch_size):
-            batch = figures[start : start + batch_size]
+        batch_size = max(1, runtime_config.get_int("SUMMARY_FIGURE_BATCH_SIZE", 6))
+        batches = [
+            figures[start : start + batch_size]
+            for start in range(0, len(figures), batch_size)
+        ]
+        total_batches = len(batches)
+        if on_stage:
+            on_stage(
+                f"敏感扫描 {len(figures)} 张截图"
+                f"（{total_batches} 批并发，受全局 LLM 池限流）"
+            )
+        logger.info(
+            "敏感扫描并发发起 %s 批（每批最多 %s 张，共 %s 张），由 llm_call_pool 限流",
+            total_batches,
+            batch_size,
+            len(figures),
+        )
+
+        async def _run_batch(
+            index: int, batch: list[PreparedFigure]
+        ) -> list[FigureScanItem]:
+            logger.info(
+                "敏感扫描批次 %s/%s 开始：%s 张图",
+                index,
+                total_batches,
+                len(batch),
+            )
             items = await self._scan_batch(batch, on_attempt=on_attempt)
+            logger.info(
+                "敏感扫描批次 %s/%s 完成：解析 %s 条",
+                index,
+                total_batches,
+                len(items),
+            )
+            return items
+
+        batch_results = await asyncio.gather(
+            *[
+                _run_batch(index, batch)
+                for index, batch in enumerate(batches, start=1)
+            ]
+        )
+        merged: dict[str, FigureScanItem] = {}
+        for items in batch_results:
             for item in items:
                 merged[item.figure_id] = item
         return merged
@@ -319,7 +360,7 @@ class FigureRedactionService:
             original_path,
             dest_path,
             mosaic_regions,
-            block_size=settings.summary_redact_mosaic_block,
+            block_size=runtime_config.get_int("SUMMARY_REDACT_MOSAIC_BLOCK", 12),
         )
         return mosaic_regions
 
@@ -342,7 +383,7 @@ class FigureRedactionService:
         on_attempt: Callable[[int, int], None] | None = None,
     ) -> FigureAuditItem:
         """对单张敏感图打码并复核。"""
-        max_attempts = max(1, settings.summary_redact_max_attempts)
+        max_attempts = max(1, runtime_config.get_int("SUMMARY_REDACT_MAX_ATTEMPTS", 3))
         trial_path = work_dir / f"{figure.figure_id}-redacted.jpg"
         original_bytes = original_path.read_bytes()
         current_regions = list(regions)
@@ -524,7 +565,7 @@ class FigureRedactionService:
         on_attempt: Callable[[int, int], None] | None = None,
     ) -> RedactionOutcome:
         """对候选截图执行脱敏；返回可交给成文模型的图列表，并附带审计明细。"""
-        if not figures or not settings.summary_redact:
+        if not figures or not runtime_config.get_bool("SUMMARY_REDACT", True):
             items = [
                 FigureAuditItem(
                     figure_id=fig.figure_id,
@@ -548,7 +589,11 @@ class FigureRedactionService:
             on_stage(f"扫描 {len(figures)} 张截图是否含敏感信息")
 
         try:
-            scan_map = await self.scan_figures(figures, on_attempt=on_attempt)
+            scan_map = await self.scan_figures(
+                figures,
+                on_attempt=on_attempt,
+                on_stage=on_stage,
+            )
         except LlmRequestError as exc:
             logger.error(
                 "敏感扫描模型不可用，隐私优先丢弃全部候选截图，本次纪要改为纯文字。"
@@ -577,30 +622,31 @@ class FigureRedactionService:
         sensitive_items = [item for item in scan_map.values() if item.sensitive]
         if on_stage:
             if sensitive_items:
-                on_stage(f"发现 {len(sensitive_items)} 张含敏感信息，开始打码复核")
+                on_stage(
+                    f"发现 {len(sensitive_items)} 张含敏感信息，"
+                    f"打码复核并发进行（受全局 LLM 池限流）"
+                )
             else:
                 on_stage("未发现敏感截图，进入纪要生成")
 
-        kept: list[PreparedFigure] = []
-        audit_items: list[FigureAuditItem] = []
-        redacted = 0
-        abandoned = 0
+        audit_by_id: dict[str, FigureAuditItem] = {}
+        sensitive_jobs: list[tuple[PreparedFigure, FigureScanItem]] = []
         for fig in figures:
             scan = scan_map.get(fig.figure_id)
             if scan is None or not scan.sensitive:
-                kept.append(fig)
-                audit_items.append(
-                    FigureAuditItem(
-                        figure_id=fig.figure_id,
-                        sensitive=False,
-                        status="CLEAN",
-                        asset_relative=fig.relative_path,
-                        original_relative=f"agent/redaction/originals/{fig.figure_id}.jpg",
-                    )
+                audit_by_id[fig.figure_id] = FigureAuditItem(
+                    figure_id=fig.figure_id,
+                    sensitive=False,
+                    status="CLEAN",
+                    asset_relative=fig.relative_path,
+                    original_relative=f"agent/redaction/originals/{fig.figure_id}.jpg",
                 )
                 continue
-            if on_stage:
-                on_stage(f"打码并复核 {fig.figure_id}")
+            sensitive_jobs.append((fig, scan))
+
+        async def _redact_job(
+            fig: PreparedFigure, scan: FigureScanItem
+        ) -> tuple[PreparedFigure, FigureAuditItem]:
             original_path = originals_dir / f"{fig.figure_id}.jpg"
             detail = await self._redact_one(
                 fig,
@@ -609,17 +655,38 @@ class FigureRedactionService:
                 original_path,
                 on_attempt=on_attempt,
             )
+            return fig, detail
+
+        if sensitive_jobs:
+            logger.info(
+                "敏感打码复核并发发起 %s 张，由 llm_call_pool 限流",
+                len(sensitive_jobs),
+            )
+            redact_results = await asyncio.gather(
+                *[_redact_job(fig, scan) for fig, scan in sensitive_jobs]
+            )
+            for fig, detail in redact_results:
+                audit_by_id[fig.figure_id] = detail
+                if detail.status != "REDACTED":
+                    fig.path.unlink(missing_ok=True)
+                    logger.warning(
+                        "截图 %s 打码复核连续失败，已丢弃该图，避免把敏感原图交给成文模型",
+                        fig.figure_id,
+                    )
+
+        kept: list[PreparedFigure] = []
+        audit_items: list[FigureAuditItem] = []
+        redacted = 0
+        abandoned = 0
+        for fig in figures:
+            detail = audit_by_id[fig.figure_id]
             audit_items.append(detail)
-            if detail.status == "REDACTED":
+            if detail.status in {"CLEAN", "REDACTED", "MANUAL_APPROVED"}:
                 kept.append(fig)
-                redacted += 1
+                if detail.status == "REDACTED":
+                    redacted += 1
             else:
                 abandoned += 1
-                fig.path.unlink(missing_ok=True)
-                logger.warning(
-                    "截图 %s 打码复核连续失败，已丢弃该图，避免把敏感原图交给成文模型",
-                    fig.figure_id,
-                )
 
         shutil.rmtree(work_dir, ignore_errors=True)
         logger.info(

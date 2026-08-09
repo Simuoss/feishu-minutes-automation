@@ -134,6 +134,8 @@ class ShareLibraryItemEntity:
     url: str
     matched_key_prefix: str | None = None
     source: str = "KEY"  # KEY / KNOWN_TOKEN
+    duration_ms: int | None = None
+    create_time: str | None = None  # 妙记生成时间（飞书 create_time）
 
 
 @dataclass

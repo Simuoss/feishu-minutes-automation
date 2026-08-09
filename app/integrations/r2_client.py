@@ -76,6 +76,45 @@ class R2Client:
         logger.info("已上传到 R2 key=%s size=%s etag=%s", key, local_path.stat().st_size, etag)
         return etag
 
+    async def upload_bytes(
+        self,
+        data: bytes,
+        key: str,
+        *,
+        content_type: str | None = None,
+    ) -> str | None:
+        kwargs: dict[str, Any] = {
+            "Bucket": settings.r2_bucket.strip(),
+            "Key": key,
+            "Body": data,
+        }
+        if content_type:
+            kwargs["ContentType"] = content_type
+        async with self._client() as client:
+            await client.put_object(**kwargs)
+            head = await client.head_object(
+                Bucket=settings.r2_bucket.strip(),
+                Key=key,
+            )
+        etag = (head.get("ETag") or "").strip('"') or None
+        logger.info("已上传字节到 R2 key=%s size=%s etag=%s", key, len(data), etag)
+        return etag
+
+    async def get_bytes(self, key: str) -> bytes:
+        async with self._client() as client:
+            response = await client.get_object(
+                Bucket=settings.r2_bucket.strip(),
+                Key=key,
+            )
+            body = response.get("Body")
+            if body is None:
+                raise R2ClientError(f"从 R2 读取对象无 Body key={key}")
+            data = await body.read()
+        if not isinstance(data, (bytes, bytearray)):
+            raise R2ClientError(f"从 R2 读取对象 Body 类型异常 key={key}")
+        logger.info("已从 R2 读取字节 key=%s size=%s", key, len(data))
+        return bytes(data)
+
     async def download_file(self, key: str, local_path: Path) -> Path:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._client() as client:
@@ -112,7 +151,13 @@ class R2Client:
             return False
 
     async def presign_get(self, key: str, *, expires_in: int | None = None) -> str:
-        ttl = expires_in if expires_in is not None else settings.r2_signed_url_ttl_seconds
+        from app.core import runtime_config
+
+        ttl = (
+            expires_in
+            if expires_in is not None
+            else runtime_config.get_int("R2_SIGNED_URL_TTL_SECONDS", 7200)
+        )
         async with self._client() as client:
             url = await client.generate_presigned_url(
                 "get_object",
@@ -122,6 +167,40 @@ class R2Client:
         if not url:
             raise R2ClientError(f"生成签名 URL 失败 key={key}")
         return url
+
+    async def ensure_browser_cors(self, allowed_origins: list[str]) -> None:
+        """允许前端浏览器直连 fetch 签名 URL（GET/HEAD）。"""
+        origins = [o.strip().rstrip("/") for o in allowed_origins if (o or "").strip()]
+        if not origins:
+            return
+        # 去重保序
+        seen: set[str] = set()
+        unique: list[str] = []
+        for origin in origins:
+            if origin in seen:
+                continue
+            seen.add(origin)
+            unique.append(origin)
+        rule = {
+            "AllowedOrigins": unique,
+            "AllowedMethods": ["GET", "HEAD"],
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
+            "MaxAgeSeconds": 3600,
+        }
+        try:
+            async with self._client() as client:
+                await client.put_bucket_cors(
+                    Bucket=settings.r2_bucket.strip(),
+                    CORSConfiguration={"CORSRules": [rule]},
+                )
+            logger.info("已配置 R2 浏览器 CORS origins=%s", unique)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "配置 R2 CORS 失败，前端直连正文可能被浏览器拦截。"
+                "请在 Cloudflare R2 桶上手动允许前端 Origin。err=%s",
+                exc,
+            )
 
 
 r2_client = R2Client()

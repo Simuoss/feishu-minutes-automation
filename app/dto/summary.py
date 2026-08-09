@@ -37,6 +37,11 @@ class SummaryProgressResponse(BaseModel):
     queue_position: int = 0
     error_message: str | None = None
     updated_at: str | None = None
+    # 全局大模型调用池实时余量（与 LLM_CONCURRENCY 对应）
+    llm_slots_total: int = 0
+    llm_slots_busy: int = 0
+    llm_slots_free: int = 0
+    llm_waiters: int = 0
 
 
 class ProgressBatchItem(BaseModel):
@@ -81,7 +86,9 @@ class SummaryMetaData(BaseModel):
 
 class SummaryDetailResponse(BaseModel):
     minute_token: str
-    content: str
+    # 有 content_url 时 content 可为空：前端应直连 R2；inline=1 时才内嵌正文
+    content: str = ""
+    content_url: str | None = None
     meta: SummaryMetaData | None = None
 
 

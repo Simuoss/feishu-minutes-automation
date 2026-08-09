@@ -170,16 +170,155 @@ function localBadge(item) {
   return `<span class="badge">未同步</span>`;
 }
 
+const STATUS_FILTER_OPTIONS = [
+  { value: "UNSYNCED", label: "未同步" },
+  { value: "SYNCING", label: "同步中" },
+  { value: "SYNCED", label: "已同步" },
+  { value: "NO_SUMMARY", label: "未生成纪要" },
+  { value: "SUMMARY_GENERATING", label: "生成纪要中" },
+  { value: "HAS_SUMMARY", label: "有纪要" },
+];
+
+/** @type {Map<string, {selected: Set<string>, options: {value:string,label:string}[], onChange: Function}>} */
+const multiSelectState = new Map();
+
 function selectedStatusFilters() {
-  return [...document.querySelectorAll("#status-filter-tags .filter-tag.is-active")]
-    .map((el) => el.dataset.status)
-    .filter(Boolean);
+  return getMultiSelectValues("status-filter");
+}
+
+function selectedSpeakerFilters() {
+  return getMultiSelectValues("speaker-filter");
 }
 
 function selectedOwnerFilters() {
   return [...document.querySelectorAll("#owner-filter-tags .filter-tag.is-active")]
     .map((el) => el.dataset.ownerId)
     .filter(Boolean);
+}
+
+function getMultiSelectValues(id) {
+  const st = multiSelectState.get(id);
+  return st ? [...st.selected] : [];
+}
+
+function renderMultiSelect(id) {
+  const root = document.getElementById(id);
+  const st = multiSelectState.get(id);
+  if (!root || !st) return;
+  const placeholder = root.dataset.placeholder || "请选择…";
+  const selectedLabels = st.options
+    .filter((opt) => st.selected.has(opt.value))
+    .map((opt) => opt.label);
+  const triggerText = selectedLabels.length
+    ? `已选 ${selectedLabels.length} 项`
+    : placeholder;
+  const optionsHtml = st.options.length
+    ? st.options
+        .map(
+          (opt) => `<label class="multi-select-option">
+            <input type="checkbox" value="${escapeHtml(opt.value)}"${
+              st.selected.has(opt.value) ? " checked" : ""
+            } />
+            <span>${escapeHtml(opt.label)}</span>
+          </label>`
+        )
+        .join("")
+    : `<div class="multi-select-empty">暂无可选项</div>`;
+  const chipsHtml = selectedLabels.length
+    ? st.options
+        .filter((opt) => st.selected.has(opt.value))
+        .map(
+          (opt) => `<button type="button" class="multi-select-chip" data-value="${escapeHtml(
+            opt.value
+          )}">${escapeHtml(opt.label)}<i class="ri ri-close-line" aria-hidden="true"></i></button>`
+        )
+        .join("")
+    : "";
+  const open = root.classList.contains("is-open");
+  root.innerHTML = `
+    <button type="button" class="multi-select-trigger" aria-expanded="${open ? "true" : "false"}">
+      <span>${escapeHtml(triggerText)}</span>
+      <i class="ri ri-arrow-down-s-line" aria-hidden="true"></i>
+    </button>
+    <div class="multi-select-panel${open ? "" : " hidden"}">${optionsHtml}</div>
+    <div class="multi-select-chips">${chipsHtml}</div>
+  `;
+}
+
+function bindMultiSelect(id, { options, onChange }) {
+  const root = document.getElementById(id);
+  if (!root) return;
+  const prev = multiSelectState.get(id);
+  const selected = new Set(prev ? prev.selected : []);
+  const valid = new Set(options.map((o) => o.value));
+  for (const value of [...selected]) {
+    if (!valid.has(value)) selected.delete(value);
+  }
+  multiSelectState.set(id, { selected, options, onChange });
+  if (!root.dataset.boundMultiSelect) {
+    root.dataset.boundMultiSelect = "1";
+    root.addEventListener("click", (e) => {
+      const st = multiSelectState.get(id);
+      if (!st) return;
+      const trigger = e.target.closest(".multi-select-trigger");
+      if (trigger && root.contains(trigger)) {
+        // 阻止冒泡：innerHTML 重绘后原 target 已脱离 DOM，
+        // 文档级监听会误判为「点在外面」并立刻关掉面板
+        e.stopPropagation();
+        root.classList.toggle("is-open");
+        renderMultiSelect(id);
+        return;
+      }
+      const chip = e.target.closest(".multi-select-chip");
+      if (chip && root.contains(chip)) {
+        e.stopPropagation();
+        st.selected.delete(chip.dataset.value || "");
+        renderMultiSelect(id);
+        st.onChange();
+        return;
+      }
+      if (e.target.closest(".multi-select-panel") && root.contains(e.target)) {
+        e.stopPropagation();
+      }
+    });
+    root.addEventListener("change", (e) => {
+      const st = multiSelectState.get(id);
+      const input = e.target;
+      if (!st || !(input instanceof HTMLInputElement) || input.type !== "checkbox") return;
+      if (!root.contains(input)) return;
+      e.stopPropagation();
+      if (input.checked) st.selected.add(input.value);
+      else st.selected.delete(input.value);
+      renderMultiSelect(id);
+      st.onChange();
+    });
+    document.addEventListener("click", (e) => {
+      if (!root.classList.contains("is-open")) return;
+      const target = e.target;
+      // 重绘后旧节点已脱离 DOM，不能当「点在外面」处理
+      if (target instanceof Node && (!target.isConnected || root.contains(target))) return;
+      root.classList.remove("is-open");
+      renderMultiSelect(id);
+    });
+  }
+  renderMultiSelect(id);
+}
+
+function syncSpeakerFilterOptions() {
+  const names = new Set();
+  for (const item of state.allItems) {
+    for (const name of item.speakers || []) {
+      const n = String(name || "").trim();
+      if (n) names.add(n);
+    }
+  }
+  const options = [...names]
+    .sort((a, b) => a.localeCompare(b, "zh"))
+    .map((name) => ({ value: name, label: name }));
+  bindMultiSelect("speaker-filter", {
+    options,
+    onChange: () => applyLocalView({ resetPage: true }),
+  });
 }
 
 function itemMatchesOneStatus(item, filter) {
@@ -214,6 +353,12 @@ function matchesOwnerFilters(item, ownerIds) {
   return ownerIds.includes(String(item.owner_id || ""));
 }
 
+function matchesSpeakerFilters(item, speakers) {
+  if (!speakers.length) return true;
+  const present = new Set((item.speakers || []).map((n) => String(n)));
+  return speakers.some((name) => present.has(name));
+}
+
 function bindFilterTagClicks(container, onChange) {
   if (!container || container.dataset.boundFilterTags) return;
   container.dataset.boundFilterTags = "1";
@@ -223,6 +368,38 @@ function bindFilterTagClicks(container, onChange) {
     tag.classList.toggle("is-active");
     onChange();
   });
+}
+
+/** 超管用户表：整页生命周期只请求一次 /admin/users */
+let adminUsersCache = null;
+let adminUsersPromise = null;
+
+async function ensureAdminUsers() {
+  if (adminUsersCache) return adminUsersCache;
+  if (adminUsersPromise) return adminUsersPromise;
+  adminUsersPromise = (async () => {
+    const owners = new Map();
+    try {
+      const res = await apiFetch("/admin/users");
+      if (res.ok) {
+        const data = await res.json();
+      for (const user of data.items || []) {
+        if (user?.id == null) continue;
+        owners.set(
+          String(user.id),
+          user.display_name || user.username || `用户 ${user.id}`
+        );
+      }
+      }
+    } catch {
+      /* 回退到列表内已有归属 */
+    }
+    adminUsersCache = owners;
+    return owners;
+  })().finally(() => {
+    adminUsersPromise = null;
+  });
+  return adminUsersPromise;
 }
 
 async function loadOwnerFilterTags() {
@@ -236,20 +413,7 @@ async function loadOwnerFilterTags() {
   }
   field.classList.remove("hidden");
   const prev = new Set(selectedOwnerFilters());
-  const owners = new Map();
-
-  try {
-    const res = await apiFetch("/admin/users");
-    if (res.ok) {
-      const data = await res.json();
-      for (const user of data.items || []) {
-        if (user?.id == null) continue;
-        owners.set(String(user.id), user.username || `用户 ${user.id}`);
-      }
-    }
-  } catch {
-    /* 回退到列表内已有归属 */
-  }
+  const owners = new Map(await ensureAdminUsers());
   for (const item of state.allItems) {
     if (item.owner_id == null || item.owner_id === "") continue;
     const id = String(item.owner_id);
@@ -332,6 +496,18 @@ async function refreshSummaryBadges() {
         item.summary_status = next;
         changed = true;
       }
+      const total = Number(row.llm_slots_total);
+      const free = Number(row.llm_slots_free);
+      const poolHint =
+        Number.isFinite(total) && total > 0
+          ? `大模型空闲 ${Number.isFinite(free) ? Math.max(0, free) : 0}/${total}`
+          : "";
+      const stageBase = row.stage || (next === "QUEUED" ? "排队中" : "生成纪要中");
+      setItemProgress(item.minute_token, {
+        percent: row.percent,
+        stage: poolHint ? `${stageBase} · ${poolHint}` : stageBase,
+        status: next === "QUEUED" ? "pending" : "downloading",
+      });
     }
     if (changed) {
       saveListCache(state.allItems);
@@ -385,6 +561,7 @@ function filterAndSortAllItems() {
   const minMs = minDur === "" ? null : Number(minDur) * 60_000;
   const maxMs = maxDur === "" ? null : Number(maxDur) * 60_000;
   const statusFilters = selectedStatusFilters();
+  const speakerFilters = selectedSpeakerFilters();
   const ownerFilters = selectedOwnerFilters();
 
   let rows = state.allItems.filter((item) => {
@@ -397,6 +574,7 @@ function filterAndSortAllItems() {
         item.owner_id,
         item.minute_token,
         item.description,
+        ...(item.speakers || []),
       ]
         .filter(Boolean)
         .join(" ")
@@ -404,6 +582,7 @@ function filterAndSortAllItems() {
       if (!hay.includes(keyword)) return false;
     }
     if (!matchesStatusFilters(item, statusFilters)) return false;
+    if (!matchesSpeakerFilters(item, speakerFilters)) return false;
     if (!matchesOwnerFilters(item, ownerFilters)) return false;
     const created = parseMeetingTime(item.create_time);
     if (start != null && !Number.isNaN(start) && created != null && created < start) return false;
@@ -664,12 +843,21 @@ function mergeByMinuteToken(freshItems, previousItems) {
   });
 }
 
+/** 翻页同步中：已拉到的云端页覆盖同 token，其余缓存项先保留，避免列表先缩后涨 */
+function mergeCloudProgress(partialFresh, baseline) {
+  const seen = new Set(partialFresh.map((item) => item.minute_token));
+  const merged = mergeByMinuteToken(partialFresh, baseline);
+  const pending = baseline.filter((item) => item?.minute_token && !seen.has(item.minute_token));
+  return pending.length ? merged.concat(pending) : merged;
+}
+
 function showCachedListFirst() {
   const cached = loadListCache();
   if (!cached) return;
   state.allItems = cached.items;
   state.lastSyncedAt = cached.saved_at || null;
   syncOwnerFilterOptions();
+  syncSpeakerFilterOptions();
   applyLocalView({ resetPage: true });
   setStatus("Thinking...", { thinking: true });
 }
@@ -719,14 +907,17 @@ async function refreshFromCloud() {
   }
   try {
     let collected;
+    const previousBaseline = state.allItems;
     if (isSuperAdminView()) {
-      // 超管无个人飞书身份：展示全站已入库会议
-      const data = await fetchStoredList();
+      // 超管：全站列表与用户表并行（用户表整页只打一次）
+      const [data] = await Promise.all([fetchStoredList(), ensureAdminUsers()]);
       collected = data.items || [];
     } else {
+      // 普通用户：page_token 必须串行；每页回来就渐进渲染，缩短首屏空白
       const byToken = new Map();
       let pageToken = null;
       let guard = 0;
+      let firstPaint = true;
       do {
         const data = await fetchCloudPage(pageToken);
         const batch = data.items || [];
@@ -739,19 +930,27 @@ async function refreshFromCloud() {
         // 飞书偶发 has_more=true 却不再给出新会议时立刻停，避免空转
         pageToken = data.has_more && added > 0 ? data.page_token : null;
         guard += 1;
-        if (byToken.size > 0 && !state.allItems.length) {
-          setStatus(`Thinking... · ${byToken.size}`);
-        } else {
-          setStatus("Thinking...", { thinking: true });
-        }
+        const partial = [...byToken.values()];
+        state.allItems = mergeCloudProgress(partial, previousBaseline);
+        state.lastSyncedAt = Date.now();
+        syncSpeakerFilterOptions();
+        applyLocalView(firstPaint ? { resetPage: true } : undefined);
+        firstPaint = false;
+        setStatus(
+          pageToken
+            ? `Thinking... · 已同步 ${byToken.size}`
+            : "Thinking...",
+          { thinking: true }
+        );
       } while (pageToken && guard < 200);
       collected = [...byToken.values()];
     }
 
-    state.allItems = mergeByMinuteToken(collected, state.allItems);
+    state.allItems = mergeByMinuteToken(collected, previousBaseline);
     state.lastSyncedAt = Date.now();
     saveListCache(state.allItems);
     syncOwnerFilterOptions();
+    syncSpeakerFilterOptions();
     applyLocalView({ resetPage: true });
   } catch (e) {
     if (state.allItems.length) {
@@ -1180,6 +1379,49 @@ async function shareSelected() {
   await openShareBatchDialog(items);
 }
 
+function closeShareBatchResultDialog() {
+  $("#share-batch-result-dialog")?.classList.add("hidden");
+}
+
+function showShareBatchResult({ lines, failed, firstUrl, keyHint, keyPlain }) {
+  const dialog = $("#share-batch-result-dialog");
+  if (!dialog) return;
+  $("#share-batch-result-msg").textContent = failed.length
+    ? `成功 ${lines.length} 条，失败 ${failed.length} 条`
+    : `已生成 ${lines.length} 条分享链接`;
+  const card = $("#share-batch-result-card");
+  if (firstUrl) {
+    card.innerHTML = shareResultCardHtml({
+      url: firstUrl,
+      title: lines.length > 1 ? "第一条链接（可扫码）" : "分享已就绪",
+      keyPlain: keyPlain || null,
+      keyHint: keyHint || "",
+    });
+    fillQrCode(card.querySelector("[data-share-qr]"), firstUrl, 160);
+    card.querySelectorAll("[data-copy-text]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await copyTextToClipboard(btn.dataset.copyText || "");
+      });
+    });
+  } else {
+    card.innerHTML = "";
+  }
+  const list = $("#share-batch-result-list");
+  const okItems = lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  const failItems = failed
+    .map((line) => `<li class="login-error">${escapeHtml(line)}</li>`)
+    .join("");
+  list.innerHTML = okItems + failItems;
+  const copyAll = $("#share-batch-copy-all");
+  if (copyAll) {
+    copyAll.onclick = async () => {
+      const ok = await copyTextToClipboard(lines.join("\n"));
+      if (ok) setStatus(`已复制 ${lines.length} 条分享链接`);
+    };
+  }
+  dialog.classList.remove("hidden");
+}
+
 async function confirmShareSelected() {
   const items = selectedLocalItems();
   if (!items.length) {
@@ -1190,14 +1432,17 @@ async function confirmShareSelected() {
 
   const access_mode = $("#share-batch-access-mode").value;
   const allow_export = $("#share-batch-allow-export").checked;
+  const keySelect = $("#share-batch-key-select");
   const access_key_id =
-    access_mode === "KEY_REQUIRED"
-      ? Number($("#share-batch-key-select").value) || null
-      : null;
+    access_mode === "KEY_REQUIRED" ? Number(keySelect?.value) || null : null;
   if (access_mode === "KEY_REQUIRED" && !access_key_id) {
     alert("请先创建并选择一把密钥");
     return;
   }
+  const keyLabel =
+    access_mode === "KEY_REQUIRED" && keySelect?.selectedOptions?.[0]
+      ? keySelect.selectedOptions[0].textContent.trim()
+      : "";
 
   closeShareBatchDialog();
 
@@ -1222,9 +1467,11 @@ async function confirmShareSelected() {
     const byToken = new Map((data.items || []).map((row) => [row.minute_token, row]));
     const lines = [];
     const failed = [];
+    let firstUrl = "";
     for (const item of items) {
       const row = byToken.get(item.minute_token);
       if (row?.url) {
+        if (!firstUrl) firstUrl = row.url;
         lines.push(shareLineForItem(item, row.url));
       } else {
         failed.push(`${meetingTitle(item)}：${row?.error || "未返回分享链接"}`);
@@ -1245,9 +1492,20 @@ async function confirmShareSelected() {
           : `已复制 ${lines.length} 条分享链接（课程名 + 时间 + 链接）`
       );
     } catch {
-      window.prompt("复制失败，请手动全选复制：", text);
-      setStatus(`已生成 ${lines.length} 条分享链接，请手动复制`);
+      setStatus(`已生成 ${lines.length} 条分享链接`);
     }
+    const keyPlain =
+      access_mode === "KEY_REQUIRED" ? loadAccessKeyPlaintext(access_key_id) : "";
+    showShareBatchResult({
+      lines,
+      failed,
+      firstUrl,
+      keyPlain,
+      keyHint:
+        !keyPlain && keyLabel
+          ? `需使用密钥：${keyLabel}。本会话未缓存明文（仅刚创建的密钥可一键复制）。`
+          : "",
+    });
   } catch (e) {
     setStatus(`分享失败：${e.message}`);
   } finally {
@@ -1266,11 +1524,11 @@ $("#refresh-btn").addEventListener("click", () => {
 $("#search-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") applyLocalView({ resetPage: true });
 });
-bindFilterTagClicks($("#status-filter-tags"), () => applyLocalView({ resetPage: true }));
+bindMultiSelect("status-filter", {
+  options: STATUS_FILTER_OPTIONS,
+  onChange: () => applyLocalView({ resetPage: true }),
+});
 bindFilterTagClicks($("#owner-filter-tags"), () => applyLocalView({ resetPage: true }));
-if (isSuperAdminView()) {
-  loadOwnerFilterTags();
-}
 $("#select-all-btn").addEventListener("click", selectAllVisible);
 $("#download-btn").addEventListener("click", downloadSelected);
 $("#batch-summary-btn").addEventListener("click", batchGenerateSummaries);
@@ -1279,6 +1537,9 @@ $("#share-batch-access-mode").addEventListener("change", syncShareBatchModeUi);
 $("#share-batch-confirm").addEventListener("click", confirmShareSelected);
 $("#share-batch-dialog").addEventListener("click", (e) => {
   if (e.target.closest("[data-close-dialog]")) closeShareBatchDialog();
+});
+$("#share-batch-result-dialog")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-close-batch-result]")) closeShareBatchResultDialog();
 });
 
 $("#download-batch-confirm").addEventListener("click", async () => {
@@ -1332,6 +1593,10 @@ document.addEventListener("keydown", (e) => {
     closeSummaryBatchDialog();
     return;
   }
+  if (!$("#share-batch-result-dialog")?.classList.contains("hidden")) {
+    closeShareBatchResultDialog();
+    return;
+  }
   if (!$("#share-batch-dialog").classList.contains("hidden")) {
     closeShareBatchDialog();
   }
@@ -1350,32 +1615,34 @@ $("#prev-page").addEventListener("click", () => {
   applyLocalView();
 });
 
-showCachedListFirst();
-checkAuth({ onMissingScopes: showMissingScopeWarning });
-
-const bootParams = new URLSearchParams(location.search);
-const bootAuth = bootParams.get("auth");
-if (bootAuth === "ok") {
-  history.replaceState({}, "", location.pathname);
-  checkAuth({ onMissingScopes: showMissingScopeWarning });
-  refreshFromCloud();
-} else if (bootAuth === "error") {
-  const raw = bootParams.get("msg") || "授权失败，请重试";
-  let message = raw;
-  try {
-    message = decodeURIComponent(raw);
-  } catch {
-    /* 保持原样 */
+async function bootListPage() {
+  const bootParams = new URLSearchParams(location.search);
+  let authError = null;
+  if (bootParams.get("auth") === "error") {
+    authError = bootParams.get("msg") || "授权失败，请重试";
+    try {
+      authError = decodeURIComponent(authError);
+    } catch {
+      /* keep */
+    }
   }
-  history.replaceState({}, "", location.pathname);
-  // 先展示失败原因，再拉列表；避免“加载失败/请先登录”把真正的 OAuth 错误盖掉
-  showAuthFailure(message);
-  refreshFromCloud().finally(() => {
-    showAuthFailure(message);
-  });
-} else {
-  refreshFromCloud();
+  const sso = await finalizeSsoLoginFromQuery();
+  if (!sso.ok) return;
+
+  showCachedListFirst();
+  await checkAuth({ onMissingScopes: showMissingScopeWarning });
+  if (typeof maybePromptDisplayName === "function") {
+    maybePromptDisplayName();
+  }
+  if (authError) {
+    showAuthFailure(authError);
+    await refreshFromCloud();
+    showAuthFailure(authError);
+  } else {
+    refreshFromCloud();
+  }
+  setInterval(refreshSummaryBadges, 8000);
+  bindAdminNav();
 }
 
-setInterval(refreshSummaryBadges, 8000);
-bindAdminNav();
+bootListPage();

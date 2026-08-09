@@ -1,4 +1,4 @@
-"""生成池的并发上限与排队行为。"""
+"""纪要作业协调：单飞，不再做作业级并发上限。"""
 
 import asyncio
 
@@ -8,8 +8,9 @@ from app.service.summary_generation_pool import SummaryGenerationPool
 OWNER = 1
 
 
-def test_pool_limits_concurrency_to_configured_value():
-    pool = SummaryGenerationPool(concurrency=2)
+def test_pool_allows_parallel_jobs_for_different_tokens():
+    """作业侧不限并发；峰值可超过旧版 semaphore 上限。"""
+    pool = SummaryGenerationPool()
     peak = 0
     active = 0
 
@@ -31,37 +32,12 @@ def test_pool_limits_concurrency_to_configured_value():
         return results
 
     results = asyncio.run(scenario())
-
     assert results == ["ok"] * 5
-    assert peak == 2, f"并发峰值应被限制为 2，实际 {peak}"
-
-
-def test_pool_reports_queue_position_for_waiting_tasks():
-    pool = SummaryGenerationPool(concurrency=1)
-
-    async def job():
-        await asyncio.sleep(0.05)
-
-    async def scenario():
-        first = asyncio.create_task(pool.submit("a", job, owner_user_id=OWNER))
-        await asyncio.sleep(0.01)
-        second = asyncio.create_task(pool.submit("b", job, owner_user_id=OWNER))
-        await asyncio.sleep(0.01)
-
-        # 第一个已在执行，第二个应处于排队状态
-        channel_b = summary_broker.get("b", owner_user_id=OWNER)
-        assert channel_b is not None
-        assert channel_b.status == SummaryStatus.QUEUED.value
-
-        await asyncio.gather(first, second)
-        summary_broker.clear("a", owner_user_id=OWNER)
-        summary_broker.clear("b", owner_user_id=OWNER)
-
-    asyncio.run(scenario())
+    assert peak == 5, f"不同 token 应可并行，峰值应为 5，实际 {peak}"
 
 
 def test_pool_sync_broker_status_reflects_running_task():
-    pool = SummaryGenerationPool(concurrency=1)
+    pool = SummaryGenerationPool()
 
     async def job():
         pool.sync_broker_status("a", owner_user_id=OWNER)
@@ -71,6 +47,10 @@ def test_pool_sync_broker_status_reflects_running_task():
         await asyncio.sleep(0.01)
 
     async def scenario():
+        # 预先放一个 channel，sync 才能把 stage 写成生成中
+        summary_broker.update(
+            "a", owner_user_id=OWNER, percent=5, stage="排队中"
+        )
         await pool.submit("a", job, owner_user_id=OWNER)
         summary_broker.clear("a", owner_user_id=OWNER)
 
@@ -78,7 +58,7 @@ def test_pool_sync_broker_status_reflects_running_task():
 
 
 def test_pool_tracks_active_tokens():
-    pool = SummaryGenerationPool(concurrency=1)
+    pool = SummaryGenerationPool()
     observed: list[bool] = []
 
     async def job():
@@ -96,7 +76,7 @@ def test_pool_tracks_active_tokens():
 
 
 def test_pool_single_flight_awaits_same_future():
-    pool = SummaryGenerationPool(concurrency=2)
+    pool = SummaryGenerationPool()
     runs = 0
 
     async def job():

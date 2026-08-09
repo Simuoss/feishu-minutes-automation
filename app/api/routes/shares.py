@@ -18,6 +18,7 @@ from app.dto.feishu.meeting import (
     LocalMeetingDetailResponse,
     LocalTranscriptResponse,
 )
+from app.dto.access_key import ShareAccessLogListResponse, ShareAccessLogResponse
 from app.dto.share import (
     ShareBatchCreateRequest,
     ShareBatchCreateResponse,
@@ -34,6 +35,7 @@ from app.dto.share import (
     ShareListResponse,
     ShareMetaResponse,
     ShareResponse,
+    ShareTrackRequest,
     ShareTryKeysRequest,
     ShareUnlockRequest,
     ShareUnlockResponse,
@@ -48,8 +50,14 @@ from app.service.ownership import assert_meeting_readable
 from app.service.r2_media_service import r2_media_service
 from app.service.redaction_access import assert_asset_safe_to_serve
 from app.service.share_service import (
-    ACTION_EXPORT,
-    ACTION_MEDIA,
+    ACTION_EXPORT_SUMMARY,
+    ACTION_EXPORT_TRANSCRIPT,
+    ACTION_VIEW_SUMMARY,
+    ACTION_VIEW_TRANSCRIPT,
+    FAIL_EXPORT,
+    RESULT_FAIL,
+    RESULT_SUCCESS,
+    ShareClientContext,
     share_service,
 )
 
@@ -83,10 +91,54 @@ def _client_meta(request: Request) -> tuple[str | None, str | None]:
     return ip, ua
 
 
+def _track_session_id(request: Request) -> str | None:
+    header = (request.headers.get("x-share-track-session") or "").strip()
+    if header:
+        return header
+    return (request.query_params.get("track_session") or "").strip() or None
+
+
+def _client_context(request: Request) -> ShareClientContext:
+    ip, ua = _client_meta(request)
+    referer = (request.headers.get("referer") or request.headers.get("referrer") or "").strip()
+    return ShareClientContext(
+        ip=ip,
+        user_agent=ua,
+        referer=referer or None,
+        track_session_id=_track_session_id(request),
+    )
+
+
 def _session_id(request: Request, header_value: str | None) -> str | None:
     if header_value:
         return header_value.strip()
     return (request.query_params.get("share_session") or "").strip() or None
+
+
+def _log_response(log) -> ShareAccessLogResponse:
+    return ShareAccessLogResponse(
+        id=log.id,  # type: ignore[arg-type]
+        access_key_id=log.access_key_id,
+        share_id=log.share_id,
+        minute_token=log.minute_token,
+        meeting_title=log.meeting_title,
+        action=log.action,
+        ip=log.ip,
+        user_agent=log.user_agent,
+        created_at=log.created_at,
+        session_id=log.session_id,
+        referer=log.referer,
+        device_type=log.device_type,
+        browser=log.browser,
+        os=log.os,
+        started_at=log.started_at,
+        ended_at=log.ended_at,
+        dwell_ms=log.dwell_ms,
+        video_progress_pct=log.video_progress_pct,
+        result=log.result,
+        fail_reason=log.fail_reason,
+        detail_json=log.detail_json,
+    )
 
 
 @admin_router.post("/meetings/{minute_token}/shares", response_model=ShareResponse)
@@ -344,6 +396,8 @@ async def share_library(body: ShareLibraryRequest) -> ShareLibraryResponse:
                 url=i.url,
                 matched_key_prefix=i.matched_key_prefix,
                 source=i.source,
+                duration_ms=i.duration_ms,
+                create_time=i.create_time,
             )
             for i in result.items
         ],
@@ -359,9 +413,11 @@ async def share_library(body: ShareLibraryRequest) -> ShareLibraryResponse:
 
 
 @guest_router.get("/{share_token}/meta", response_model=ShareMetaResponse)
-async def share_meta(share_token: str) -> ShareMetaResponse:
+async def share_meta(share_token: str, request: Request) -> ShareMetaResponse:
     try:
-        meta = await share_service.get_meta(share_token)
+        meta = await share_service.get_meta(
+            share_token, client=_client_context(request)
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ShareMetaResponse(**meta)
@@ -371,10 +427,10 @@ async def share_meta(share_token: str) -> ShareMetaResponse:
 async def share_unlock(
     share_token: str, body: ShareUnlockRequest, request: Request
 ) -> ShareUnlockResponse:
-    ip, ua = _client_meta(request)
+    ctx = _client_context(request)
     try:
         session, prefix = await share_service.unlock_with_meta(
-            share_token, body.key, ip=ip, user_agent=ua
+            share_token, body.key, client=ctx
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -395,10 +451,10 @@ async def share_try_keys(
     share_token: str, body: ShareTryKeysRequest, request: Request
 ) -> ShareUnlockResponse:
     """一次提交多把本机密钥，命中即解锁，避免前端逐把试钥往返。"""
-    ip, ua = _client_meta(request)
+    ctx = _client_context(request)
     try:
         session, prefix = await share_service.try_unlock_with_keys(
-            share_token, body.keys, ip=ip, user_agent=ua
+            share_token, body.keys, client=ctx
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -414,28 +470,67 @@ async def share_try_keys(
     )
 
 
+@guest_router.post("/{share_token}/track")
+async def share_track(
+    share_token: str, body: ShareTrackRequest, request: Request
+) -> dict:
+    ctx = _client_context(request)
+    if body.session_id:
+        ctx.track_session_id = body.session_id.strip()
+    try:
+        await share_service.track_guest(
+            share_token,
+            action=body.action,
+            client=ctx,
+            video_progress_pct=body.video_progress_pct,
+            dwell_ms=body.dwell_ms,
+            started_at=body.started_at,
+            ended_at=body.ended_at,
+            detail=body.detail,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 async def _authorized_share(
     share_token: str,
     request: Request,
     x_share_session: str | None,
     *,
-    action: str,
+    action: str = "",
     require_export: bool = False,
 ):
-    ip, ua = _client_meta(request)
+    ctx = _client_context(request)
     try:
         return await share_service.resolve_access(
             share_token,
             _session_id(request, x_share_session),
             action=action,
-            ip=ip,
-            user_agent=ua,
             require_export=require_export,
+            client=ctx,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+async def _log_content_view(share, request: Request, action: str) -> None:
+    if share.id is None:
+        return
+    await share_service.log_access(
+        share_id=share.id,
+        minute_token=share.minute_token,
+        action=action,
+        access_key_id=share.access_key_id,
+        client=_client_context(request),
+        result=RESULT_SUCCESS,
+        dedupe_view=True,
+        owner_user_id=share.owner_user_id,
+    )
 
 
 def _require_share_owner(share) -> int:
@@ -450,9 +545,7 @@ async def share_detail(
     request: Request,
     x_share_session: str | None = Header(default=None),
 ) -> LocalMeetingDetailResponse:
-    share = await _authorized_share(
-        share_token, request, x_share_session, action="VIEW"
-    )
+    share = await _authorized_share(share_token, request, x_share_session)
     owner = _require_share_owner(share)
     detail = await _list_service.get_local_meeting_async(
         share.minute_token, owner_user_id=owner
@@ -509,18 +602,32 @@ async def share_transcript(
     share_token: str,
     request: Request,
     x_share_session: str | None = Header(default=None),
+    inline: bool = Query(
+        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
+    ),
 ) -> LocalTranscriptResponse:
-    share = await _authorized_share(
-        share_token, request, x_share_session, action="VIEW"
-    )
+    from app.service.r2_media_service import r2_media_service
+
+    share = await _authorized_share(share_token, request, x_share_session)
+    await _log_content_view(share, request, ACTION_VIEW_TRANSCRIPT)
     owner = _require_share_owner(share)
+    if not inline:
+        transcript_url = await r2_media_service.presign_transcript_text(
+            share.minute_token, owner_user_id=owner
+        )
+        if transcript_url:
+            return LocalTranscriptResponse(
+                minute_token=share.minute_token,
+                transcript="",
+                transcript_url=transcript_url,
+            )
     text = await _storage.read_transcript_async(
         share.minute_token, owner_user_id=owner
     )
     if text is None:
         raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
     return LocalTranscriptResponse(
-        minute_token=share.minute_token, transcript=text
+        minute_token=share.minute_token, transcript=text, transcript_url=None
     )
 
 
@@ -529,11 +636,38 @@ async def share_summary(
     share_token: str,
     request: Request,
     x_share_session: str | None = Header(default=None),
+    inline: bool = Query(
+        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
+    ),
 ) -> SummaryDetailResponse:
-    share = await _authorized_share(
-        share_token, request, x_share_session, action="VIEW"
-    )
+    from app.service.metadata_db_service import read_summary_meta
+    from app.service.r2_media_service import r2_media_service
+
+    share = await _authorized_share(share_token, request, x_share_session)
+    await _log_content_view(share, request, ACTION_VIEW_SUMMARY)
     owner = _require_share_owner(share)
+    if not inline:
+        content_url = await r2_media_service.presign_summary_text(
+            share.minute_token, owner_user_id=owner
+        )
+        if content_url:
+            meta = await read_summary_meta(
+                share.minute_token, owner_user_id=owner
+            ) or {}
+            return SummaryDetailResponse(
+                minute_token=share.minute_token,
+                content="",
+                content_url=content_url,
+                meta=SummaryMetaData(
+                    **{
+                        k: v
+                        for k, v in meta.items()
+                        if k in SummaryMetaData.model_fields
+                    }
+                )
+                if meta
+                else None,
+            )
     detail = await _storage.read_summary_async(
         share.minute_token, owner_user_id=owner
     )
@@ -545,7 +679,10 @@ async def share_summary(
     return SummaryDetailResponse(
         minute_token=detail["minute_token"],
         content=detail["content"],
-        meta=SummaryMetaData(**{k: v for k, v in meta.items() if k in SummaryMetaData.model_fields}),
+        content_url=None,
+        meta=SummaryMetaData(
+            **{k: v for k, v in meta.items() if k in SummaryMetaData.model_fields}
+        ),
     )
 
 
@@ -556,9 +693,7 @@ async def share_summary_asset(
     request: Request,
     x_share_session: str | None = Header(default=None),
 ) -> Response:
-    share = await _authorized_share(
-        share_token, request, x_share_session, action=ACTION_MEDIA
-    )
+    share = await _authorized_share(share_token, request, x_share_session)
     owner = _require_share_owner(share)
     await assert_asset_safe_to_serve(
         share.minute_token, filename, owner_user_id=owner
@@ -585,9 +720,7 @@ async def share_media(
     request: Request,
     x_share_session: str | None = Header(default=None),
 ) -> FileResponse:
-    share = await _authorized_share(
-        share_token, request, x_share_session, action=ACTION_MEDIA
-    )
+    share = await _authorized_share(share_token, request, x_share_session)
     owner = _require_share_owner(share)
     path = _storage.resolve_media_path(
         share.minute_token, filename, owner_user_id=owner
@@ -609,19 +742,51 @@ async def share_export_summary(
         share_token,
         request,
         x_share_session,
-        action=ACTION_EXPORT,
         require_export=True,
     )
     owner = _require_share_owner(share)
+    ctx = _client_context(request)
     try:
         data, filename, media_type = export_service.export_summary(
             share.minute_token, format, owner_user_id=owner
         )
     except LookupError as exc:
+        await share_service.log_access(
+            share_id=share.id,  # type: ignore[arg-type]
+            minute_token=share.minute_token,
+            action=ACTION_EXPORT_SUMMARY,
+            access_key_id=share.access_key_id,
+            client=ctx,
+            result=RESULT_FAIL,
+            fail_reason=FAIL_EXPORT,
+            detail={"format": format, "error": str(exc)},
+            owner_user_id=owner,
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("分享纪要导出失败 token=%s format=%s: %s", share.minute_token, format, exc)
+        await share_service.log_access(
+            share_id=share.id,  # type: ignore[arg-type]
+            minute_token=share.minute_token,
+            action=ACTION_EXPORT_SUMMARY,
+            access_key_id=share.access_key_id,
+            client=ctx,
+            result=RESULT_FAIL,
+            fail_reason=FAIL_EXPORT,
+            detail={"format": format, "error": str(exc)},
+            owner_user_id=owner,
+        )
         raise HTTPException(status_code=500, detail=f"导出失败：{exc}") from exc
+    await share_service.log_access(
+        share_id=share.id,  # type: ignore[arg-type]
+        minute_token=share.minute_token,
+        action=ACTION_EXPORT_SUMMARY,
+        access_key_id=share.access_key_id,
+        client=ctx,
+        result=RESULT_SUCCESS,
+        detail={"format": format},
+        owner_user_id=owner,
+    )
     return Response(
         content=data,
         media_type=media_type,
@@ -640,18 +805,58 @@ async def share_export_transcript(
         share_token,
         request,
         x_share_session,
-        action=ACTION_EXPORT,
         require_export=True,
     )
     owner = _require_share_owner(share)
+    ctx = _client_context(request)
     try:
         data, filename, media_type = export_service.export_transcript(
             share.minute_token, format, owner_user_id=owner
         )
     except LookupError as exc:
+        await share_service.log_access(
+            share_id=share.id,  # type: ignore[arg-type]
+            minute_token=share.minute_token,
+            action=ACTION_EXPORT_TRANSCRIPT,
+            access_key_id=share.access_key_id,
+            client=ctx,
+            result=RESULT_FAIL,
+            fail_reason=FAIL_EXPORT,
+            detail={"format": format, "error": str(exc)},
+            owner_user_id=owner,
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await share_service.log_access(
+        share_id=share.id,  # type: ignore[arg-type]
+        minute_token=share.minute_token,
+        action=ACTION_EXPORT_TRANSCRIPT,
+        access_key_id=share.access_key_id,
+        client=ctx,
+        result=RESULT_SUCCESS,
+        detail={"format": format},
+        owner_user_id=owner,
+    )
     return Response(
         content=data,
         media_type=media_type,
         headers={"Content-Disposition": content_disposition(filename)},
     )
+
+
+@admin_router.get("/shares/{share_id}/logs", response_model=ShareAccessLogListResponse)
+async def list_share_logs(
+    share_id: int,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> ShareAccessLogListResponse:
+    try:
+        logs = await share_service.list_logs_by_share(
+            share_id,
+            owner_user_id=owner_scope_user_id(request),
+            limit=limit,
+            offset=offset,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ShareAccessLogListResponse(items=[_log_response(log) for log in logs])

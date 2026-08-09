@@ -20,4 +20,5 @@ class R2SyncStateORM(Base):
     video_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     video_updated_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     assets_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[int] = mapped_column(BigInteger)

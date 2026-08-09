@@ -25,6 +25,12 @@ function mountAdminSidebar() {
       icon: "ri-admin-line",
       label: "管理员列表",
     });
+    navItems.push({
+      id: "system-configs",
+      href: "/system-configs.html",
+      icon: "ri-settings-3-line",
+      label: "系统配置",
+    });
   }
 
   const navHtml = navItems
@@ -75,6 +81,11 @@ function mountAdminSidebar() {
         <i class="ri ri-user-add-line" aria-hidden="true"></i><span class="btn-label">邀请注册</span>
       </button>`
     : "";
+  const accountBtn = !superView
+    ? `<button id="account-btn" class="btn btn-sm" type="button" title="账号设置">
+        <i class="ri ri-user-settings-line" aria-hidden="true"></i><span class="btn-label">账号</span>
+      </button>`
+    : "";
 
   root.innerHTML = `
     <div class="sidebar-brand">
@@ -91,6 +102,7 @@ function mountAdminSidebar() {
     <div class="sidebar-footer">
       <span id="auth-status" class="auth-status">授权检查中…</span>
       <div class="sidebar-footer-actions">
+        ${accountBtn}
         ${inviteBtn}
         <a id="reauth-btn" class="btn btn-sm" href="#"><i class="ri ri-shield-user-line" aria-hidden="true"></i><span class="btn-label">飞书授权</span></a>
         <a id="logout-btn" class="btn btn-sm" href="#"><i class="ri ri-logout-box-r-line" aria-hidden="true"></i><span class="btn-label">退出</span></a>
@@ -100,10 +112,12 @@ function mountAdminSidebar() {
   `;
 
   ensureSuperUnlockModal();
+  ensureAccountModals();
   bindSuperGesture(root.querySelector("#sidebar-brand-role"));
   bindModeToggle(root);
   bindSuperModal(document);
   bindInvite(root);
+  bindAccount(root);
 }
 
 function ensureSuperUnlockModal() {
@@ -315,6 +329,207 @@ async function bindInvite(root) {
       } else {
         alert(e.message || "生成邀请失败");
       }
+    }
+  });
+}
+
+function ensureAccountModals() {
+  if (!document.getElementById("display-name-modal")) {
+    const nameModal = document.createElement("div");
+    nameModal.id = "display-name-modal";
+    nameModal.className = "modal hidden";
+    nameModal.setAttribute("role", "dialog");
+    nameModal.setAttribute("aria-modal", "true");
+    nameModal.innerHTML = `
+      <div class="modal-backdrop" data-close-display-name></div>
+      <div class="modal-card">
+        <h2>确认显示名</h2>
+        <p class="modal-hint">这是你在平台上的显示名称（会议列表「所有者」等）。可保持飞书昵称或自行修改。</p>
+        <label class="field field-wide">
+          <span>显示名</span>
+          <input id="display-name-input" type="text" maxlength="64" autocomplete="nickname" />
+        </label>
+        <p id="display-name-error" class="login-error hidden"></p>
+        <div class="modal-actions">
+          <button id="display-name-save" class="btn btn-primary" type="button">确认</button>
+        </div>
+      </div>`;
+    document.body.appendChild(nameModal);
+  }
+  if (!document.getElementById("account-settings-modal")) {
+    const acc = document.createElement("div");
+    acc.id = "account-settings-modal";
+    acc.className = "modal hidden";
+    acc.setAttribute("role", "dialog");
+    acc.setAttribute("aria-modal", "true");
+    acc.innerHTML = `
+      <div class="modal-backdrop" data-close-account></div>
+      <div class="modal-card">
+        <h2>账号设置</h2>
+        <p id="account-feishu-meta" class="modal-hint"></p>
+        <label class="field field-wide">
+          <span>显示名</span>
+          <input id="account-display-name-input" type="text" maxlength="64" autocomplete="nickname" />
+        </label>
+        <label class="field field-wide">
+          <span>新密码（可选，至少 6 位）</span>
+          <input id="account-password-input" type="password" autocomplete="new-password" placeholder="留空则不修改" />
+        </label>
+        <label id="account-old-password-field" class="field field-wide hidden">
+          <span>原密码</span>
+          <input id="account-old-password-input" type="password" autocomplete="current-password" />
+        </label>
+        <p id="account-settings-error" class="login-error hidden"></p>
+        <div class="modal-actions">
+          <button id="account-settings-save" class="btn btn-primary" type="button">保存</button>
+          <button class="btn" type="button" data-close-account>取消</button>
+        </div>
+      </div>`;
+    document.body.appendChild(acc);
+  }
+}
+
+async function maybePromptDisplayName() {
+  if (isSuperAdminView()) return;
+  if (sessionStorage.getItem("setup_display_name") !== "1") return;
+  const modal = document.getElementById("display-name-modal");
+  const input = document.getElementById("display-name-input");
+  const err = document.getElementById("display-name-error");
+  if (!modal || !input) return;
+  try {
+    const res = await apiFetch("/auth/me");
+    if (!res.ok) return;
+    const me = await res.json();
+    if (!me.needs_display_name_setup) {
+      sessionStorage.removeItem("setup_display_name");
+      return;
+    }
+    input.value = me.display_name || me.feishu_name || "";
+    err?.classList.add("hidden");
+    modal.classList.remove("hidden");
+  } catch {
+    /* ignore */
+  }
+}
+
+function bindAccount(root) {
+  const openBtn = root.querySelector("#account-btn");
+  const nameModal = document.getElementById("display-name-modal");
+  const accModal = document.getElementById("account-settings-modal");
+
+  document.getElementById("display-name-save")?.addEventListener("click", async () => {
+    const input = document.getElementById("display-name-input");
+    const err = document.getElementById("display-name-error");
+    const name = (input?.value || "").trim();
+    if (!name) {
+      if (err) {
+        err.textContent = "请填写显示名";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    const res = await apiFetch("/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (err) {
+        err.textContent = typeof data.detail === "string" ? data.detail : "保存失败";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    sessionStorage.removeItem("setup_display_name");
+    nameModal?.classList.add("hidden");
+  });
+
+  nameModal?.addEventListener("click", (e) => {
+    // 首次确认不允许点遮罩跳过
+    if (e.target.closest("[data-close-display-name]")) return;
+  });
+
+  openBtn?.addEventListener("click", async () => {
+    const err = document.getElementById("account-settings-error");
+    err?.classList.add("hidden");
+    try {
+      const res = await apiFetch("/auth/me");
+      const me = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(me.detail || "加载账号失败");
+      const meta = document.getElementById("account-feishu-meta");
+      if (meta) {
+        meta.textContent = me.feishu_bound
+          ? `已绑定飞书${me.feishu_name ? `（${me.feishu_name}）` : ""} · 内部账号 ${me.username}`
+          : `未绑定飞书 · 内部账号 ${me.username} · 可点侧栏「绑定飞书」`;
+      }
+      const nameInput = document.getElementById("account-display-name-input");
+      if (nameInput) nameInput.value = me.display_name || "";
+      const pwd = document.getElementById("account-password-input");
+      const oldField = document.getElementById("account-old-password-field");
+      const oldInput = document.getElementById("account-old-password-input");
+      if (pwd) pwd.value = "";
+      if (oldInput) oldInput.value = "";
+      oldField?.classList.toggle("hidden", !me.has_password);
+      accModal?.classList.remove("hidden");
+      accModal.dataset.hasPassword = me.has_password ? "1" : "0";
+    } catch (e) {
+      alert(e.message || "加载账号失败");
+    }
+  });
+
+  document.getElementById("account-settings-save")?.addEventListener("click", async () => {
+    const err = document.getElementById("account-settings-error");
+    err?.classList.add("hidden");
+    const display_name = (
+      document.getElementById("account-display-name-input")?.value || ""
+    ).trim();
+    if (!display_name) {
+      if (err) {
+        err.textContent = "显示名不能为空";
+        err.classList.remove("hidden");
+      }
+      return;
+    }
+    try {
+      let res = await apiFetch("/auth/me", {
+        method: "PATCH",
+        body: JSON.stringify({ display_name }),
+      });
+      let data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "保存显示名失败");
+      }
+      const password = (
+        document.getElementById("account-password-input")?.value || ""
+      ).trim();
+      if (password) {
+        const body = { password };
+        if (accModal?.dataset.hasPassword === "1") {
+          body.old_password =
+            document.getElementById("account-old-password-input")?.value || "";
+        }
+        res = await apiFetch("/auth/me/password", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(typeof data.detail === "string" ? data.detail : "设置密码失败");
+        }
+      }
+      sessionStorage.removeItem("setup_display_name");
+      accModal?.classList.add("hidden");
+    } catch (e) {
+      if (err) {
+        err.textContent = e.message || "保存失败";
+        err.classList.remove("hidden");
+      }
+    }
+  });
+
+  accModal?.addEventListener("click", (e) => {
+    if (e.target.closest("[data-close-account]")) {
+      accModal.classList.add("hidden");
     }
   });
 }

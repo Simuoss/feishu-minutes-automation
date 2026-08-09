@@ -22,8 +22,36 @@ async def lifespan(_app: FastAPI):
     global _ws_runner
     setup_logging(debug=settings.app_debug)
     await init_db()
+    from app.service.system_config_service import system_config_service
+
+    await system_config_service.ensure_seeded_and_load()
+    from app.service.meeting_record_cleanup import cleanup_failed_and_duplicate_meetings
+    from app.service.speakers_backfill import backfill_missing_speakers
+
+    try:
+        await cleanup_failed_and_duplicate_meetings()
+    except Exception:  # noqa: BLE001 — 清理失败不阻断启动
+        pass
+    try:
+        await backfill_missing_speakers()
+    except Exception:  # noqa: BLE001 — 回填失败不阻断启动
+        pass
     # 重启后内存池已空：超时仍卡在进行中的 DB 行标失败，避免永久「同步中/生成中」
     await recover_stale_inflight_jobs()
+    # 前端直连 R2 正文需要桶 CORS
+    try:
+        from app.integrations.r2_client import r2_client
+
+        if r2_client.configured:
+            await r2_client.ensure_browser_cors(
+                [
+                    settings.frontend_origin,
+                    f"http://localhost:{settings.frontend_port}",
+                    f"http://127.0.0.1:{settings.frontend_port}",
+                ]
+            )
+    except Exception:  # noqa: BLE001 — CORS 失败不阻断启动
+        pass
     _ws_runner = FeishuWsClientRunner()
     _ws_runner.start()
     # 进程重启后补订阅：用户身份订阅不会随 WS 建连自动恢复

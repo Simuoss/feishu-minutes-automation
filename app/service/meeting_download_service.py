@@ -1,10 +1,10 @@
 import asyncio
+import json
 import logging
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.core.config import settings
+from app.core import runtime_config
 from app.core.resource_key import storage_relpath
 from app.data_model.entity.meeting_record import (
     MeetingRecordCreateEntity,
@@ -16,8 +16,8 @@ from app.repository.uow import UnitOfWork
 from app.service.download_pool import download_pool
 from app.service.download_progress_store import download_progress_store
 from app.service.meeting_storage_service import MeetingStorageService
-from app.service.r2_media_service import r2_media_service
 from app.service.summary_generation_service import summary_generation_service
+from app.service.transcript_anchor import extract_unique_speakers
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class MeetingDownloadService:
 
     @staticmethod
     def _spawn_auto_summary(minute_token: str, *, owner_user_id: int) -> None:
-        if not settings.summary_auto_generate:
+        if not runtime_config.get_bool("SUMMARY_AUTO_GENERATE", True):
             return
         task: asyncio.Task[object] = asyncio.create_task(
             summary_generation_service.generate(
@@ -67,12 +67,6 @@ class MeetingDownloadService:
             "已为妙记排队自动生成纪要 owner=%s token=%s",
             owner_user_id,
             minute_token,
-        )
-
-    @staticmethod
-    def _spawn_r2_share_video(minute_token: str, *, owner_user_id: int) -> None:
-        r2_media_service.spawn_share_video(
-            minute_token, owner_user_id=owner_user_id
         )
 
     async def download_minute(
@@ -129,7 +123,6 @@ class MeetingDownloadService:
                     minute_token, owner_user_id=owner_id
                 )
                 self._spawn_auto_summary(minute_token, owner_user_id=owner_id)
-                self._spawn_r2_share_video(minute_token, owner_user_id=owner_id)
                 return DownloadResult(
                     minute_token=minute_token,
                     record_id=existing.id,
@@ -174,8 +167,12 @@ class MeetingDownloadService:
     ) -> DownloadResult:
         owner_id = int(owner_user_id)
         rel = storage_relpath(owner_id, minute_token)
+        storage_path = str(
+            self._storage.get_meeting_dir(minute_token, owner_user_id=owner_id)
+        )
 
-        raw_event = feishu_event_id or f"manual-{minute_token}-{uuid.uuid4().hex[:12]}"
+        # 稳定事件键：同用户同 token 反复录入必须覆盖，禁止每次 UUID 开新行
+        raw_event = (feishu_event_id or f"manual-{minute_token}").strip()
         event_id = (
             raw_event
             if raw_event.endswith(f":u{owner_id}")
@@ -184,31 +181,63 @@ class MeetingDownloadService:
 
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
-            dup = await uow.meeting_records.get_by_event_id(event_id)
-            if dup:
-                return DownloadResult(
-                    minute_token=minute_token,
-                    record_id=dup.id,
-                    status=dup.status,
-                    error_message=dup.error_message,
-                )
-
-            record = await uow.meeting_records.create(
-                MeetingRecordCreateEntity(
-                    feishu_event_id=event_id,
-                    event_type=event_type,
-                    unique_key=unique_key,
-                    minute_token=minute_token,
-                    status="DOWNLOADING",
-                    storage_path=str(
-                        self._storage.get_meeting_dir(
-                            minute_token, owner_user_id=owner_id
-                        )
-                    ),
-                    owner_user_id=owner_id,
-                    storage_root_relpath=rel,
-                )
+            existing = await uow.meeting_records.get_latest_by_minute_token(
+                minute_token, owner_user_id=owner_id
             )
+            if existing is not None and existing.id is not None:
+                record = await uow.meeting_records.update(
+                    MeetingRecordUpdateEntity(
+                        id=existing.id,
+                        event_type=event_type,
+                        unique_key=unique_key or existing.unique_key,
+                        minute_token=minute_token,
+                        status="DOWNLOADING",
+                        error_message="",
+                        storage_path=storage_path,
+                        owner_user_id=owner_id,
+                        storage_root_relpath=rel,
+                    )
+                )
+                if record is None or record.id is None:
+                    raise RuntimeError("覆盖下载记录失败，未返回 record id")
+                event_id = existing.feishu_event_id
+                logger.info(
+                    "覆盖已有会议主档重新下载 token=%s owner=%s record_id=%s",
+                    minute_token,
+                    owner_id,
+                    record.id,
+                )
+            else:
+                by_event = await uow.meeting_records.get_by_event_id(event_id)
+                if by_event is not None and by_event.id is not None:
+                    record = await uow.meeting_records.update(
+                        MeetingRecordUpdateEntity(
+                            id=by_event.id,
+                            event_type=event_type,
+                            unique_key=unique_key or by_event.unique_key,
+                            minute_token=minute_token,
+                            status="DOWNLOADING",
+                            error_message="",
+                            storage_path=storage_path,
+                            owner_user_id=owner_id,
+                            storage_root_relpath=rel,
+                        )
+                    )
+                    if record is None or record.id is None:
+                        raise RuntimeError("按事件覆盖下载记录失败，未返回 record id")
+                else:
+                    record = await uow.meeting_records.create(
+                        MeetingRecordCreateEntity(
+                            feishu_event_id=event_id,
+                            event_type=event_type,
+                            unique_key=unique_key,
+                            minute_token=minute_token,
+                            status="DOWNLOADING",
+                            storage_path=storage_path,
+                            owner_user_id=owner_id,
+                            storage_root_relpath=rel,
+                        )
+                    )
             record_id = record.id
             if record_id is None:
                 raise RuntimeError("创建下载记录失败，未返回 record id")
@@ -248,8 +277,13 @@ class MeetingDownloadService:
                     percent=100.0,
                     finished=True,
                 )
+                # 下载完成后即可压缩上云供播放；原片仍保留，待纪要完成后 finalize 再删
+                from app.service.r2_media_service import r2_media_service
+
+                r2_media_service.spawn_share_video(
+                    minute_token, owner_user_id=owner_id
+                )
                 self._spawn_auto_summary(minute_token, owner_user_id=owner_id)
-                self._spawn_r2_share_video(minute_token, owner_user_id=owner_id)
                 return DownloadResult(
                     minute_token=minute_token, record_id=record_id, status="COMPLETED"
                 )
@@ -398,6 +432,7 @@ class MeetingDownloadService:
             progress(percent=40, stage="保留已有音视频")
 
         transcript_path = existing_meta.get("files", {}).get("transcript")
+        speakers: list[str] = []
         if fetch_transcript:
             progress(percent=75, stage="导出转写文本")
             transcript_bytes = await minutes.download_transcript(
@@ -409,8 +444,24 @@ class MeetingDownloadService:
                     minute_token, transcript_bytes, owner_user_id=owner_id
                 )
             )
+            try:
+                speakers = extract_unique_speakers(
+                    transcript_bytes.decode("utf-8", errors="replace")
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "转写已保存但解析参会人失败 token=%s，列表人员筛选将缺该项。"
+                    "怀疑转写格式与飞书段落头不一致。err=%s",
+                    minute_token,
+                    exc,
+                )
         else:
             progress(percent=80, stage="保留已有转写")
+            existing_text = self._storage.read_transcript(
+                minute_token, owner_user_id=owner_id
+            )
+            if existing_text:
+                speakers = extract_unique_speakers(existing_text)
 
         progress(percent=90, stage="写入本地元数据")
 
@@ -419,6 +470,8 @@ class MeetingDownloadService:
             "minute_token": minute_token,
             "title": minute_info.title,
             "duration_ms": minute_info.duration_ms,
+            # 飞书妙记生成时间（毫秒时间戳或可解析字符串），侧栏/列表按此排序展示
+            "create_time": minute_info.create_time or existing_meta.get("create_time"),
             "has_video": has_video,
             "feishu_event_id": feishu_event_id,
             "unique_key": unique_key,
@@ -448,6 +501,7 @@ class MeetingDownloadService:
                     media_relpath=str(media_path) if media_path else None,
                     transcript_relpath=str(transcript_path) if transcript_path else None,
                     storage_root_relpath=storage_relpath(owner_id, minute_token),
+                    speakers_json=json.dumps(speakers, ensure_ascii=False),
                 )
             )
             await uow.commit()

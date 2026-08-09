@@ -10,6 +10,20 @@ from app.core.db_base import Base
 __all__ = ["Base", "async_session_factory", "engine", "get_session", "init_db"]
 
 _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "users": [
+        ("display_name", "VARCHAR(128)"),
+        ("display_name_set_at", "BIGINT"),
+        ("feishu_open_id", "VARCHAR(128)"),
+        ("feishu_union_id", "VARCHAR(128)"),
+        ("feishu_user_id", "VARCHAR(128)"),
+        ("feishu_name", "VARCHAR(128)"),
+        ("feishu_en_name", "VARCHAR(128)"),
+        ("feishu_avatar_url", "VARCHAR(512)"),
+        ("feishu_tenant_key", "VARCHAR(128)"),
+        ("feishu_email", "VARCHAR(256)"),
+        ("feishu_mobile", "VARCHAR(64)"),
+        ("feishu_profile_json", "TEXT"),
+    ],
     "meeting_records": [
         ("owner_user_id", "INTEGER"),
         ("summary_status", "VARCHAR(32)"),
@@ -17,6 +31,7 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("transcript_relpath", "VARCHAR(512)"),
         ("downloaded_at", "BIGINT"),
         ("storage_root_relpath", "VARCHAR(512)"),
+        ("speakers_json", "TEXT"),
     ],
     "shares": [
         ("owner_user_id", "INTEGER"),
@@ -29,6 +44,7 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "r2_sync_states": [
         ("owner_user_id", "INTEGER"),
+        ("text_json", "TEXT"),
     ],
     "figures": [
         ("owner_user_id", "INTEGER"),
@@ -38,6 +54,21 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "pipeline_jobs": [
         ("owner_user_id", "INTEGER"),
+    ],
+    "share_access_logs": [
+        ("session_id", "VARCHAR(64)"),
+        ("referer", "VARCHAR(512)"),
+        ("device_type", "VARCHAR(32)"),
+        ("browser", "VARCHAR(64)"),
+        ("os", "VARCHAR(64)"),
+        ("started_at", "BIGINT"),
+        ("ended_at", "BIGINT"),
+        ("dwell_ms", "INTEGER"),
+        ("video_progress_pct", "INTEGER"),
+        ("result", "VARCHAR(32)"),
+        ("fail_reason", "VARCHAR(64)"),
+        ("detail_json", "TEXT"),
+        ("meeting_title", "VARCHAR(512)"),
     ],
 }
 
@@ -89,6 +120,132 @@ def _ensure_columns_sync(connection) -> None:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}"))
 
 
+def _ensure_user_feishu_index_sync(connection) -> None:
+    """幂等创建 open_id 唯一索引（旧库 ALTER 加列后不会自动带约束）。"""
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_feishu_open_id "
+            "ON users(feishu_open_id) WHERE feishu_open_id IS NOT NULL"
+        )
+    )
+
+
+def _ensure_share_access_logs_nullable_key_sync(connection) -> None:
+    """旧表 access_key_id 为 NOT NULL：重建表以支持公开分享日志。"""
+    inspector = inspect(connection)
+    if "share_access_logs" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"]: c for c in inspector.get_columns("share_access_logs")}
+    key_col = cols.get("access_key_id")
+    if key_col is None:
+        return
+    if key_col.get("nullable", True):
+        return
+    connection.execute(
+        text(
+            """
+            CREATE TABLE share_access_logs__new (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                access_key_id INTEGER,
+                share_id INTEGER NOT NULL,
+                minute_token VARCHAR(32) NOT NULL,
+                meeting_title VARCHAR(512),
+                action VARCHAR(32) NOT NULL,
+                ip VARCHAR(64),
+                user_agent TEXT,
+                created_at BIGINT NOT NULL,
+                session_id VARCHAR(64),
+                referer VARCHAR(512),
+                device_type VARCHAR(32),
+                browser VARCHAR(64),
+                os VARCHAR(64),
+                started_at BIGINT,
+                ended_at BIGINT,
+                dwell_ms INTEGER,
+                video_progress_pct INTEGER,
+                result VARCHAR(32),
+                fail_reason VARCHAR(64),
+                detail_json TEXT
+            )
+            """
+        )
+    )
+    # 按现有列动态拼 INSERT，兼容尚未 ALTER 完的旧库
+    existing = set(cols)
+    new_cols = [
+        "id",
+        "access_key_id",
+        "share_id",
+        "minute_token",
+        "meeting_title",
+        "action",
+        "ip",
+        "user_agent",
+        "created_at",
+        "session_id",
+        "referer",
+        "device_type",
+        "browser",
+        "os",
+        "started_at",
+        "ended_at",
+        "dwell_ms",
+        "video_progress_pct",
+        "result",
+        "fail_reason",
+        "detail_json",
+    ]
+    select_exprs = [
+        name if name in existing else "NULL" for name in new_cols
+    ]
+    connection.execute(
+        text(
+            f"INSERT INTO share_access_logs__new ({', '.join(new_cols)}) "
+            f"SELECT {', '.join(select_exprs)} FROM share_access_logs"
+        )
+    )
+    connection.execute(text("DROP TABLE share_access_logs"))
+    connection.execute(
+        text("ALTER TABLE share_access_logs__new RENAME TO share_access_logs")
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_access_key_id "
+            "ON share_access_logs (access_key_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_share_id "
+            "ON share_access_logs (share_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_minute_token "
+            "ON share_access_logs (minute_token)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_created_at "
+            "ON share_access_logs (created_at)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_session_id "
+            "ON share_access_logs (session_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_share_access_logs_action "
+            "ON share_access_logs (action)"
+        )
+    )
+
+
 async def init_db() -> None:
     from app.repository.orm import (  # noqa: F401
         access_key,
@@ -103,6 +260,7 @@ async def init_db() -> None:
         share,
         share_access_log,
         summary_run,
+        system_config,
         user,
     )
 
@@ -110,6 +268,8 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         if settings.database_url.startswith("sqlite"):
             await conn.run_sync(_ensure_columns_sync)
+            await conn.run_sync(_ensure_share_access_logs_nullable_key_sync)
+            await conn.run_sync(_ensure_user_feishu_index_sync)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

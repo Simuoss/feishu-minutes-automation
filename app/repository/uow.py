@@ -16,6 +16,7 @@ from app.repository.redaction_figure_repository import RedactionFigureRepository
 from app.repository.share_access_log_repository import ShareAccessLogRepository
 from app.repository.share_repository import ShareRepository
 from app.repository.summary_run_repository import SummaryRunRepository
+from app.repository.system_config_repository import SystemConfigRepository
 from app.repository.user_repository import UserRepository
 
 
@@ -35,6 +36,7 @@ class UnitOfWork:
         self.feishu_user_tokens: FeishuUserTokenRepository | None = None
         self.pipeline_jobs: PipelineJobRepository | None = None
         self.r2_sync_states: R2SyncStateRepository | None = None
+        self.system_configs: SystemConfigRepository | None = None
 
     async def __aenter__(self) -> Self:
         self._session = async_session_factory()
@@ -51,6 +53,7 @@ class UnitOfWork:
         self.feishu_user_tokens = FeishuUserTokenRepository(self._session)
         self.pipeline_jobs = PipelineJobRepository(self._session)
         self.r2_sync_states = R2SyncStateRepository(self._session)
+        self.system_configs = SystemConfigRepository(self._session)
         return self
 
     async def __aexit__(

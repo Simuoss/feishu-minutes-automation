@@ -347,10 +347,30 @@ async def get_summary(
     minute_token: str,
     request: Request,
     owner_user_id: int | None = None,
+    inline: bool = Query(
+        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
+    ),
 ) -> SummaryDetailResponse:
     owner = await assert_meeting_readable(
         request, minute_token, owner_user_id=owner_user_id
     )
+    if not inline:
+        content_url = await r2_media_service.presign_summary_text(
+            minute_token, owner_user_id=owner
+        )
+        if content_url:
+            from app.service.metadata_db_service import read_summary_meta
+
+            meta = await read_summary_meta(
+                minute_token, owner_user_id=owner
+            ) or {}
+            # 无本地/元数据时仍可能只有 R2 正文
+            return SummaryDetailResponse(
+                minute_token=minute_token,
+                content="",
+                content_url=content_url,
+                meta=_meta_to_dto(meta) if meta else None,
+            )
     detail = await _storage.read_summary_async(
         minute_token, owner_user_id=owner
     )
@@ -360,6 +380,7 @@ async def get_summary(
     return SummaryDetailResponse(
         minute_token=detail["minute_token"],
         content=detail["content"],
+        content_url=None,
         meta=_meta_to_dto(meta),
     )
 

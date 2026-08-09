@@ -117,8 +117,20 @@ class ShareLibraryItemData(BaseModel):
     url: str
     matched_key_prefix: str | None = None
     source: str
+    duration_ms: int | None = None
+    create_time: str | None = None
 
 
 class ShareLibraryResponse(BaseModel):
     items: list[ShareLibraryItemData]
     keys: list[ShareLibraryKeyStatusData]
+
+
+class ShareTrackRequest(BaseModel):
+    action: str = Field(description="PLAY_VIDEO 或 SESSION_END")
+    session_id: str | None = None
+    video_progress_pct: int | None = Field(default=None, ge=0, le=100)
+    dwell_ms: int | None = Field(default=None, ge=0)
+    started_at: int | None = None
+    ended_at: int | None = None
+    detail: dict | None = None

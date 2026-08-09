@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260805-sidebar" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260806-access-logs-group" />
 </head>
 <body class="admin-body" data-admin-page="keys">
   <div id="app" class="admin-shell">
@@ -53,17 +53,27 @@
         <ul id="keys-list" class="meeting-list"></ul>
       </section>
 
-      <section id="logs-panel" class="panel hidden">
-        <h2 class="panel-title">访问日志 · <span id="logs-key-name"></span></h2>
-        <ul id="logs-list" class="meeting-list"></ul>
-      </section>
     </main>
     </div>
   </div>
 
+  <div id="key-logs-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="key-logs-heading">
+    <div class="modal-backdrop" data-close-logs></div>
+    <div class="modal-card modal-card-logs">
+      <h3 id="key-logs-heading" class="modal-title">访问日志</h3>
+      <p class="modal-msg">密钥 · <span id="logs-key-name"></span></p>
+      <div class="access-logs-scroll">
+        <ul id="logs-list" class="meeting-list"></ul>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" type="button" data-close-logs><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">关闭</span></button>
+      </div>
+    </div>
+  </div>
+
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/common.js?v=20260805-auth"></script>
-  <script defer src="/assets/admin-shell.js?v=20260805-users"></script>
-  <script defer src="/assets/keys.js?v=20260805-thinking"></script>
+  <script defer src="/assets/common.js?v=20260806-share-ux"></script>
+  <script defer src="/assets/admin-shell.js?v=20260806-filters-config"></script>
+  <script defer src="/assets/keys.js?v=20260806-access-logs-group"></script>
 </body>
 </html>

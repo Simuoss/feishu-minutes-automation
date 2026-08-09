@@ -328,7 +328,7 @@ const SUMMARY_STAGES = [
   {
     id: "queue",
     title: "排队等待",
-    desc: "任务已提交，等待生成池空位",
+    desc: "任务已提交，等待全局大模型空闲槽位",
   },
   {
     id: "parse",
@@ -573,7 +573,7 @@ async function loadRedactionAudit(token) {
   }
 }
 
-function renderSummary(markdown, meta) {
+function renderSummary(markdown, meta, { loadSide = true } = {}) {
   detailState.summaryMarkdown = markdown || "";
   const content = $("#summary-content");
   const hasSummary = Boolean(markdown);
@@ -588,25 +588,32 @@ function renderSummary(markdown, meta) {
     hasSummary ? "重新生成" : "生成纪要"
   );
   if (hasSummary) bindTimeAnchors();
-  if (detailState.token) {
+  // 首屏由 openDetail 并行拉侧栏；生成完成 / 手动刷新仍走这里
+  if (loadSide && detailState.token) {
     loadMetrics(detailState.token);
     loadRedactionAudit(detailState.token);
   }
 }
 
-async function loadSummary(token) {
+async function loadSummary(token, { loadSide = true } = {}) {
   try {
-    const res = await apiFetch(withOwnerQuery(`/meetings/${token}/summary`));
+    const path = withOwnerQuery(`/meetings/${token}/summary`);
+    const res = await apiFetch(path);
     if (res.status === 404) {
-      renderSummary("", null);
+      renderSummary("", null, { loadSide });
       return false;
     }
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
-    renderSummary(data.content, data.meta);
-    return true;
+    const content = await resolveTextPayload(data, {
+      kind: "summary",
+      inlineFetcher: apiFetch,
+      inlinePath: path,
+    });
+    renderSummary(content, data.meta, { loadSide });
+    return Boolean(content);
   } catch {
-    renderSummary("", null);
+    renderSummary("", null, { loadSide });
     return false;
   }
 }
@@ -669,13 +676,29 @@ function appendPlanItem(item) {
   paintSummaryProgress();
 }
 
+function formatLlmPoolHint(data) {
+  const total = Number(data?.llm_slots_total);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const free = Number(data.llm_slots_free);
+  const freeSafe = Number.isFinite(free) ? Math.max(0, free) : 0;
+  const waiters = Number(data.llm_waiters);
+  const waitPart =
+    Number.isFinite(waiters) && waiters > 0 ? ` · ${waiters} 个在等槽` : "";
+  return `大模型空闲 ${freeSafe}/${total}${waitPart}`;
+}
+
 function describeSummaryStatus(data) {
-  if (data.status === "QUEUED") {
-    return data.queue_position > 0
-      ? `排队中，前面还有 ${data.queue_position} 个任务`
-      : "排队中，即将开始";
+  const pool = formatLlmPoolHint(data);
+  if (data.status === "QUEUED" || data.status === "PENDING") {
+    if (pool) {
+      return Number(data.llm_slots_free) <= 0
+        ? `等待大模型空闲 · ${pool}`
+        : `排队中 · ${pool}`;
+    }
+    return "排队中…";
   }
-  return data.stage || "生成中…";
+  const stage = data.stage || "生成中…";
+  return pool ? `${stage} · ${pool}` : stage;
 }
 
 function summaryProgressSuffix() {
@@ -860,33 +883,88 @@ async function generateSummary() {
   }
 }
 
+/** 只拉转写正文（可与纪要/ticket 并行）；UI 由 applyTranscript 挂载。 */
+async function fetchTranscriptText(minuteToken) {
+  const path = withOwnerQuery(`/meetings/local/${minuteToken}/transcript`);
+  const res = await apiFetch(path);
+  if (!res.ok) throw new Error("转写加载失败");
+  const data = await res.json();
+  return resolveTextPayload(data, {
+    kind: "transcript",
+    inlineFetcher: apiFetch,
+    inlinePath: path,
+  });
+}
+
+function applyTranscript(text, mediaElement) {
+  detailState.fullTranscriptText = text || "";
+  if (!text) {
+    $("#transcript-scroll").innerHTML = `<p class="muted">暂无转写</p>`;
+    return;
+  }
+  if (mediaElement) setupDetailSync(mediaElement, text);
+  else renderTranscript(parseTranscript(text));
+}
+
 async function loadTranscript(minuteToken, mediaElement) {
   try {
-    const res = await apiFetch(
-      withOwnerQuery(`/meetings/local/${minuteToken}/transcript`)
-    );
-    if (!res.ok) {
-      $("#transcript-scroll").innerHTML =
-        `<p class="muted">转写加载失败</p>`;
-      return;
-    }
-    const data = await res.json();
-    const text = data.transcript || "";
-    detailState.fullTranscriptText = text;
-    if (!text) {
-      $("#transcript-scroll").innerHTML =
-        `<p class="muted">暂无转写</p>`;
-      return;
-    }
-    if (mediaElement) {
-      setupDetailSync(mediaElement, text);
-    } else {
-      renderTranscript(parseTranscript(text));
-    }
+    const text = await fetchTranscriptText(minuteToken);
+    applyTranscript(text, mediaElement);
   } catch (e) {
     $("#transcript-scroll").innerHTML =
       `<p class="muted">转写加载失败：${escapeHtml(e.message || "")}</p>`;
   }
+}
+
+/** 访问票就绪后挂载媒体播放器；R2 绝对 URL 不拼 ticket。 */
+function mountDetailMedia(data) {
+  let mediaElement = null;
+  let hasMedia = false;
+  const mediaEl = $("#media-players");
+  mediaEl.innerHTML = "";
+  (data.media_files || []).forEach((mf) => {
+    hasMedia = true;
+    const label = escapeHtml(mf.name);
+    let mediaUrl = mf.url || "";
+    if (/^https?:\/\//i.test(mediaUrl)) {
+      try {
+        const target = new URL(mediaUrl);
+        const apiHost = new URL(API).host;
+        if (target.host === apiHost) {
+          mediaUrl = withAccessTicketQuery(withOwnerQuery(mediaUrl));
+        }
+      } catch {
+        /* keep as-is */
+      }
+    } else {
+      mediaUrl = withAccessTicketQuery(
+        withOwnerQuery(
+          mediaUrl ||
+            `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
+        )
+      );
+    }
+    if (mf.kind === "video") {
+      mediaEl.insertAdjacentHTML(
+        "beforeend",
+        `<div class="media-card"><p class="media-name">${label}</p><video controls preload="metadata" src="${mediaUrl}"></video></div>`
+      );
+      if (!mediaElement) mediaElement = mediaEl.querySelector("video");
+    } else if (mf.kind === "audio") {
+      mediaEl.insertAdjacentHTML(
+        "beforeend",
+        `<div class="media-card"><p class="media-name">${label}</p><audio controls preload="metadata" src="${mediaUrl}"></audio></div>`
+      );
+      if (!mediaElement) mediaElement = mediaEl.querySelector("audio");
+    } else {
+      mediaEl.insertAdjacentHTML(
+        "beforeend",
+        `<div class="media-card"><p class="media-name">${label}</p><a class="btn btn-sm" href="${mediaUrl}" target="_blank" rel="noopener">${btnContent("download-2-line", "下载文件")}</a></div>`
+      );
+    }
+  });
+  if (hasMedia) $("#media-section").classList.remove("hidden");
+  return mediaElement;
 }
 
 async function maybeFollowSummaryStream(token) {
@@ -922,9 +1000,10 @@ async function openDetail(minuteToken) {
   $("#detail-empty").classList.remove("hidden");
   $("#generate-summary-btn").disabled = false;
   showSummaryProgress(false);
-  renderSummary("", null);
+  renderSummary("", null, { loadSide: false });
 
   try {
+    // 唯一硬门闩：本地元数据（title / media / has_transcript）
     const res = await apiFetch(withOwnerQuery(`/meetings/local/${minuteToken}`));
     if (!res.ok) throw new Error("本地资源不存在，请先下载该会议");
     const data = await res.json();
@@ -939,78 +1018,51 @@ async function openDetail(minuteToken) {
     $("#detail-meta").textContent = metaParts.join(" · ");
     $("#detail-empty").classList.add("hidden");
 
-    // 媒体访问票与纪要并行，避免串行等待
-    const [, hasSummary] = await Promise.all([
-      ensureAccessTicket(),
-      loadSummary(minuteToken),
-    ]);
-
-    let hasContent = false;
-    let mediaElement = null;
-    const mediaEl = $("#media-players");
-
-    (data.media_files || []).forEach((mf) => {
-      hasContent = true;
-      const label = escapeHtml(mf.name);
-      // R2 预签名为绝对 URL，不可再拼 access_ticket；否则签名失效
-      let mediaUrl = mf.url || "";
-      if (/^https?:\/\//i.test(mediaUrl)) {
-        try {
-          const target = new URL(mediaUrl);
-          const apiHost = new URL(API).host;
-          if (target.host === apiHost) {
-            mediaUrl = withAccessTicketQuery(withOwnerQuery(mediaUrl));
-          }
-        } catch {
-          /* keep as-is */
-        }
-      } else {
-        mediaUrl = withAccessTicketQuery(
-          withOwnerQuery(
-            mediaUrl ||
-              `${API}/meetings/local/${detailState.token}/media/${encodeURIComponent(mf.name)}`
-          )
-        );
-      }
-      if (mf.kind === "video") {
-        mediaEl.insertAdjacentHTML(
-          "beforeend",
-          `<div class="media-card"><p class="media-name">${label}</p><video controls preload="metadata" src="${mediaUrl}"></video></div>`
-        );
-        if (!mediaElement) mediaElement = mediaEl.querySelector("video");
-      } else if (mf.kind === "audio") {
-        mediaEl.insertAdjacentHTML(
-          "beforeend",
-          `<div class="media-card"><p class="media-name">${label}</p><audio controls preload="metadata" src="${mediaUrl}"></audio></div>`
-        );
-        if (!mediaElement) mediaElement = mediaEl.querySelector("audio");
-      } else {
-        mediaEl.insertAdjacentHTML(
-          "beforeend",
-          `<div class="media-card"><p class="media-name">${label}</p><a class="btn btn-sm" href="${mediaUrl}" target="_blank" rel="noopener">${btnContent("download-2-line", "下载文件")}</a></div>`
-        );
-      }
-    });
-
-    if (hasContent) $("#media-section").classList.remove("hidden");
-
     const hasTranscript = Boolean(data.has_transcript);
+    const hasMediaFiles = Boolean((data.media_files || []).length);
     if (hasTranscript) {
       detailState.fullTranscriptText = "";
       $("#transcript-scroll").innerHTML = thinkingHtml({ block: true });
       $("#transcript-section").classList.remove("hidden");
-      hasContent = true;
-      loadTranscript(minuteToken, mediaElement);
+    }
+
+    // 先拿访问票再并行拉媒体/纪要，避免 img 无 ticket 打到 401「需要管理员登录」
+    const ticketP = ensureAccessTicket();
+    const mediaP = ticketP.then(() => mountDetailMedia(data));
+    const summaryP = ticketP.then(() =>
+      loadSummary(minuteToken, { loadSide: false })
+    );
+    const transcriptP = hasTranscript
+      ? fetchTranscriptText(minuteToken).catch((e) => {
+          $("#transcript-scroll").innerHTML =
+            `<p class="muted">转写加载失败：${escapeHtml(e.message || "")}</p>`;
+          return null;
+        })
+      : Promise.resolve(null);
+    const sideP = Promise.all([
+      loadMetrics(minuteToken),
+      loadRedactionAudit(minuteToken),
+    ]);
+
+    const [mediaElement, hasSummary, transcriptText] = await Promise.all([
+      mediaP,
+      summaryP,
+      transcriptP,
+      sideP,
+    ]);
+
+    if (hasTranscript && transcriptText !== null) {
+      applyTranscript(transcriptText, mediaElement);
     }
 
     document
       .querySelector('.tab-btn[data-tab="transcript"]')
       .classList.toggle("hidden", !hasTranscript);
 
+    const hasContent = hasMediaFiles || hasTranscript || hasSummary;
     if (hasTranscript || hasSummary) {
       $("#detail-tabs").classList.remove("hidden");
       switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
-      hasContent = true;
     }
 
     // 已有完成纪要时不挂空 SSE；仅生成中才跟随
@@ -1164,8 +1216,9 @@ function closeShareDialog() {
 async function createShare() {
   const access_mode = $("#share-access-mode").value;
   const allow_export = $("#share-allow-export").checked;
+  const keySelect = $("#share-key-select");
   const access_key_id =
-    access_mode === "KEY_REQUIRED" ? Number($("#share-key-select").value) || null : null;
+    access_mode === "KEY_REQUIRED" ? Number(keySelect?.value) || null : null;
   if (access_mode === "KEY_REQUIRED" && !access_key_id) {
     alert("请先创建并选择一把密钥");
     return;
@@ -1180,12 +1233,28 @@ async function createShare() {
     return;
   }
   const data = await res.json();
+  const keyLabel =
+    access_mode === "KEY_REQUIRED" && keySelect?.selectedOptions?.[0]
+      ? keySelect.selectedOptions[0].textContent.trim()
+      : "";
+  const keyPlain = access_key_id ? loadAccessKeyPlaintext(access_key_id) : "";
   const result = $("#share-result");
   result.classList.remove("hidden");
-  result.innerHTML = `已创建：<code>${escapeHtml(data.url)}</code>
-    <button type="button" class="btn btn-sm" id="copy-new-share">${btnContent("file-copy-line", "复制链接")}</button>`;
-  $("#copy-new-share")?.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(data.url);
+  result.innerHTML = shareResultCardHtml({
+    url: data.url,
+    title: "分享已就绪",
+    keyPlain,
+    keyHint:
+      !keyPlain && keyLabel
+        ? `需使用密钥：${keyLabel}。若本会话未创建过该密钥，明文仅在「密钥管理」创建时可见。`
+        : "",
+  });
+  fillQrCode(result.querySelector("[data-share-qr]"), data.url, 160);
+  result.querySelectorAll("[data-copy-text]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const ok = await copyTextToClipboard(btn.dataset.copyText || "");
+      if (ok) btn.querySelector(".btn-label") && (btn.querySelector(".btn-label").textContent = "已复制");
+    });
   });
   await refreshShareList();
 }
@@ -1229,5 +1298,27 @@ if (!token) {
   alert("超级管理员查看会议详情时必须指定所属用户（请从全站列表进入）");
   location.replace("/");
 } else {
+  if (typeof initPassageAsk === "function") {
+    initPassageAsk({
+      storageKey: `ask:meeting:${token}`,
+      roots: [
+        {
+          el: "#summary-content",
+          kind: "SUMMARY",
+          getText: () => detailState.summaryMarkdown || "",
+        },
+        {
+          el: "#transcript-scroll",
+          kind: "TRANSCRIPT",
+          getText: () => detailState.fullTranscriptText || "",
+        },
+      ],
+      askStream: async (body) =>
+        apiFetch(withOwnerQuery(`/meetings/${detailState.token}/ask/stream`), {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+    });
+  }
   openDetail(token);
 }

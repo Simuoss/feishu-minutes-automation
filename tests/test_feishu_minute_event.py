@@ -31,6 +31,7 @@ def _payload(
     event_id: str = "evt-1",
     minute_token: str = "obcnq3b9jl72l83w4f14xxxx",
     meeting_id: str | None = "6911188411934433028",
+    subscriber_open_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {"minute_token": minute_token}
     if meeting_id is not None:
@@ -38,6 +39,10 @@ def _payload(
             "source_type": "meeting",
             "source_entity_id": meeting_id,
         }
+    if subscriber_open_ids is not None:
+        event["subscriber_ids"] = [
+            {"open_id": oid} for oid in subscriber_open_ids
+        ]
     return {
         "header": {
             "event_id": event_id,
@@ -47,15 +52,28 @@ def _payload(
     }
 
 
-def _patch_feishu_token_users(
-    monkeypatch: pytest.MonkeyPatch, user_ids: list[int]
+def _patch_subscriber_users(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    open_id_to_user_id: dict[str, int],
+    token_user_ids: list[int],
 ) -> None:
+    class StubUser:
+        def __init__(self, user_id: int) -> None:
+            self.id = user_id
+
+    class StubUsers:
+        async def get_by_feishu_open_id(self, open_id: str) -> StubUser | None:
+            uid = open_id_to_user_id.get(open_id)
+            return StubUser(uid) if uid is not None else None
+
     class StubTokens:
         async def list_user_ids_with_tokens(self) -> list[int]:
-            return list(user_ids)
+            return list(token_user_ids)
 
     class StubUow:
         def __init__(self) -> None:
+            self.users = StubUsers()
             self.feishu_user_tokens = StubTokens()
 
         async def __aenter__(self) -> Self:
@@ -72,9 +90,15 @@ def test_minute_generated_triggers_download_with_token(
 ) -> None:
     fake = FakeDownload()
     service = FeishuEventService(download=fake)  # pyright: ignore[reportArgumentType]
-    _patch_feishu_token_users(monkeypatch, [42])
+    _patch_subscriber_users(
+        monkeypatch,
+        open_id_to_user_id={"ou_owner": 42},
+        token_user_ids=[42, 99],
+    )
 
-    result = asyncio.run(service.handle_event(_payload()))
+    result = asyncio.run(
+        service.handle_event(_payload(subscriber_open_ids=["ou_owner"]))
+    )
 
     assert result == {
         "handled": True,
@@ -90,6 +114,47 @@ def test_minute_generated_triggers_download_with_token(
     assert call["skip_if_completed"] is True
     assert call["ready_retries"] >= 1
     assert call["owner_user_id"] == 42
+
+
+def test_minute_generated_skips_users_not_in_subscribers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeDownload()
+    service = FeishuEventService(download=fake)  # pyright: ignore[reportArgumentType]
+    _patch_subscriber_users(
+        monkeypatch,
+        open_id_to_user_id={"ou_owner": 42},
+        token_user_ids=[42, 4],
+    )
+
+    result = asyncio.run(
+        service.handle_event(_payload(subscriber_open_ids=["ou_owner"]))
+    )
+
+    assert result is not None
+    assert result["record_ids"] == [7]
+    assert [c["owner_user_id"] for c in fake.calls] == [42]
+
+
+def test_minute_generated_without_subscribers_skips_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeDownload()
+    service = FeishuEventService(download=fake)  # pyright: ignore[reportArgumentType]
+    _patch_subscriber_users(
+        monkeypatch,
+        open_id_to_user_id={"ou_owner": 42},
+        token_user_ids=[42],
+    )
+
+    result = asyncio.run(service.handle_event(_payload(subscriber_open_ids=[])))
+
+    assert result == {
+        "handled": True,
+        "event_type": EVENT_MINUTE_GENERATED,
+        "record_ids": [],
+    }
+    assert fake.calls == []
 
 
 def test_minute_generated_without_token_is_ignored() -> None:
@@ -193,7 +258,11 @@ def test_download_retries_when_minute_not_ready(monkeypatch: Any) -> None:
             )
 
     monkeypatch.setattr(service, "_download_and_store", flaky_store)
-    monkeypatch.setattr(service, "_spawn_auto_summary", lambda _token: None)
+    monkeypatch.setattr(
+        service,
+        "_spawn_auto_summary",
+        lambda _token, *, owner_user_id: None,
+    )
     _patch_download_uow(monkeypatch, service)
 
     result = asyncio.run(

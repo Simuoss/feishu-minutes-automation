@@ -39,12 +39,22 @@ async function loadUsers() {
         (u) => `<tr>
           <td>${escapeHtml(String(u.id))}</td>
           <td><strong>${escapeHtml(u.username)}</strong></td>
+          <td>${escapeHtml(u.display_name || u.username || "—")}</td>
           <td>${statusBadge(u.status)}</td>
           <td>${escapeHtml(String(u.meeting_count ?? 0))}</td>
+          <td title="${escapeHtml(
+            u.total_duration_ms
+              ? formatDuration(u.total_duration_ms)
+              : "0"
+          )}">${escapeHtml(String(u.total_duration_text ?? "0"))}</td>
           <td>${escapeHtml(String(u.share_count ?? 0))}</td>
           <td>${escapeHtml(String(u.access_key_count ?? 0))}</td>
           <td>${escapeHtml(String(u.invites_created ?? 0))} / ${escapeHtml(String(u.invites_redeemed ?? 0))}</td>
-          <td>${u.feishu_authorized ? '<span class="badge badge-local">已授权</span>' : '<span class="badge badge-pending">未授权</span>'}</td>
+          <td>${
+            u.feishu_bound || u.feishu_authorized
+              ? '<span class="badge badge-local">已绑定</span>'
+              : '<span class="badge badge-pending">未绑定</span>'
+          }</td>
           <td>${escapeHtml(u.created_at_text || "—")}</td>
           <td>${escapeHtml(u.updated_at_text || "—")}</td>
         </tr>`

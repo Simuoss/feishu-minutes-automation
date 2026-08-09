@@ -207,18 +207,7 @@ function updateSelectionUi() {
   );
 }
 
-async function loadShares() {
-  setThinkingStatus($("#shares-status"));
-  $("#shares-list").innerHTML = `<li class="meeting-item">${thinkingHtml({ block: true })}</li>`;
-  const qs = buildFilterQuery();
-  const res = await apiFetch(`/shares?${qs}`);
-  if (!res.ok) {
-    $("#shares-status").textContent = "加载失败";
-    $("#shares-list").innerHTML =
-      `<li class="meeting-item"><span class="meeting-meta">加载失败</span></li>`;
-    return;
-  }
-  const data = await res.json();
+function applySharesPayload(data) {
   const items = data.items || [];
   editState.items = items;
   const visible = new Set(items.map((s) => s.id));
@@ -248,6 +237,7 @@ async function loadShares() {
             <p class="meeting-title">${escapeHtml(title)}${statusBadge(s)}</p>
             <div class="export-group">
               <button type="button" class="btn btn-sm" data-copy="${escapeHtml(s.url)}" title="复制链接">${btnContent("file-copy-line", "复制")}</button>
+              <button type="button" class="btn btn-sm" data-share-logs="${s.id}" data-title="${escapeHtml(title)}" title="访问日志">${btnContent("file-list-3-line", "日志")}</button>
               ${
                 revoked
                   ? ""
@@ -272,6 +262,44 @@ async function loadShares() {
   updateSelectionUi();
 }
 
+function closeShareLogsDialog() {
+  $("#share-logs-dialog")?.classList.add("hidden");
+}
+
+async function loadShareLogs(shareId, title) {
+  const dialog = $("#share-logs-dialog");
+  const list = $("#share-logs-list");
+  $("#share-logs-title").textContent = title || `分享 #${shareId}`;
+  list.innerHTML = `<li class="meeting-item">${thinkingHtml({ block: true })}</li>`;
+  dialog?.classList.remove("hidden");
+  const res = await apiFetch(`/shares/${shareId}/logs?limit=100`);
+  if (!res.ok) {
+    list.innerHTML = `<li class="meeting-item"><span class="meeting-meta">加载失败</span></li>`;
+    return;
+  }
+  const data = await res.json();
+  const items = data.items || [];
+  if (!items.length) {
+    list.innerHTML = `<li class="meeting-item"><span class="meeting-meta">暂无访问记录</span></li>`;
+    return;
+  }
+  list.innerHTML = renderAccessLogGroups(items);
+}
+
+async function loadShares() {
+  setThinkingStatus($("#shares-status"));
+  $("#shares-list").innerHTML = `<li class="meeting-item">${thinkingHtml({ block: true })}</li>`;
+  const qs = buildFilterQuery();
+  const res = await apiFetch(`/shares?${qs}`);
+  if (!res.ok) {
+    $("#shares-status").textContent = "加载失败";
+    $("#shares-list").innerHTML =
+      `<li class="meeting-item"><span class="meeting-meta">加载失败</span></li>`;
+    return;
+  }
+  applySharesPayload(await res.json());
+}
+
 function selectedActiveIds() {
   return [...editState.selected].filter((id) => {
     const item = editState.items.find((s) => s.id === id);
@@ -293,8 +321,16 @@ $("#share-edit-save").addEventListener("click", saveEdit);
 $("#share-edit-dialog").addEventListener("click", (e) => {
   if (e.target.closest("[data-close-dialog]")) closeEditDialog();
 });
+$("#share-logs-dialog")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-close-logs]")) closeShareLogsDialog();
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#share-edit-dialog").classList.contains("hidden")) {
+  if (e.key !== "Escape") return;
+  if (!$("#share-logs-dialog")?.classList.contains("hidden")) {
+    closeShareLogsDialog();
+    return;
+  }
+  if (!$("#share-edit-dialog").classList.contains("hidden")) {
     closeEditDialog();
   }
 });
@@ -388,6 +424,11 @@ $("#shares-list").addEventListener("click", async (e) => {
     openEditDialog(share);
     return;
   }
+  const logsBtn = e.target.closest("[data-share-logs]");
+  if (logsBtn) {
+    await loadShareLogs(logsBtn.dataset.shareLogs, logsBtn.dataset.title || "");
+    return;
+  }
   const revoke = e.target.closest("[data-revoke]");
   if (revoke) {
     if (!confirm("确定取消该分享？链接将立即失效。")) return;
@@ -404,6 +445,18 @@ $("#shares-list").addEventListener("click", async (e) => {
 bindAdminNav();
 checkAuth();
 (async () => {
-  await loadKeysCache();
-  await loadShares();
+  // 密钥表只为展示 keyLabel / 筛选项；与分享列表无串行依赖，并行拉再渲染
+  setThinkingStatus($("#shares-status"));
+  $("#shares-list").innerHTML = `<li class="meeting-item">${thinkingHtml({ block: true })}</li>`;
+  const [, res] = await Promise.all([
+    loadKeysCache(),
+    apiFetch(`/shares?${buildFilterQuery()}`),
+  ]);
+  if (!res.ok) {
+    $("#shares-status").textContent = "加载失败";
+    $("#shares-list").innerHTML =
+      `<li class="meeting-item"><span class="meeting-meta">加载失败</span></li>`;
+    return;
+  }
+  applySharesPayload(await res.json());
 })();

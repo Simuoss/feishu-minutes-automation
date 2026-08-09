@@ -7,6 +7,7 @@ import logging
 import re
 from pathlib import Path
 
+from app.core import runtime_config
 from app.service.meeting_storage_service import MeetingStorageService
 
 logger = logging.getLogger(__name__)
@@ -33,20 +34,29 @@ class ExportService:
             self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
         ).get("title") or minute_token
         safe = self._safe_filename(title)
+        watermark = self._watermark_text()
 
         if fmt == "md":
             text = self.strip_images(content)
             return text.encode("utf-8"), f"{safe}-summary.md", "text/markdown; charset=utf-8"
         if fmt == "docx":
             data = self._summary_to_docx(
-                minute_token, content, title, owner_user_id=owner_user_id
+                minute_token,
+                content,
+                title,
+                owner_user_id=owner_user_id,
+                watermark=watermark,
             )
             return data, f"{safe}-summary.docx", (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
         if fmt == "pdf":
             data = self._summary_to_pdf(
-                minute_token, content, title, owner_user_id=owner_user_id
+                minute_token,
+                content,
+                title,
+                owner_user_id=owner_user_id,
+                watermark=watermark,
             )
             return data, f"{safe}-summary.pdf", "application/pdf"
         raise ValueError("纪要导出格式仅支持 pdf / docx / md")
@@ -71,6 +81,10 @@ class ExportService:
             md = f"# {title}\n\n```\n{text.rstrip()}\n```\n"
             return md.encode("utf-8"), f"{safe}-transcript.md", "text/markdown; charset=utf-8"
         raise ValueError("转写导出格式仅支持 md / txt")
+
+    @staticmethod
+    def _watermark_text() -> str:
+        return (runtime_config.get_str("EXPORT_WATERMARK_TEXT", "") or "").strip()
 
     @staticmethod
     def strip_images(markdown: str) -> str:
@@ -120,12 +134,31 @@ class ExportService:
             return None
 
     def _summary_to_docx(
-        self, minute_token: str, markdown: str, title: str, *, owner_user_id: int
+        self,
+        minute_token: str,
+        markdown: str,
+        title: str,
+        *,
+        owner_user_id: int,
+        watermark: str = "",
     ) -> bytes:
         from docx import Document
-        from docx.shared import Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.shared import Inches, Pt, RGBColor
 
         doc = Document()
+        if watermark:
+            for section in doc.sections:
+                header = section.header
+                header.is_linked_to_previous = False
+                paragraph = (
+                    header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+                )
+                paragraph.text = ""
+                run = paragraph.add_run(watermark)
+                run.font.size = Pt(11)
+                run.font.color.rgb = RGBColor(0xB0, 0xB0, 0xB0)
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_heading(title, level=0)
         for raw in markdown.splitlines():
             line = raw.rstrip()
@@ -169,7 +202,13 @@ class ExportService:
         return buffer.getvalue()
 
     def _summary_to_pdf(
-        self, minute_token: str, markdown: str, title: str, *, owner_user_id: int
+        self,
+        minute_token: str,
+        markdown: str,
+        title: str,
+        *,
+        owner_user_id: int,
+        watermark: str = "",
     ) -> bytes:
         import markdown as md_lib
         from xhtml2pdf import pisa
@@ -195,6 +234,15 @@ class ExportService:
             html_body,
             flags=re.IGNORECASE,
         )
+        watermark_html = ""
+        if watermark:
+            wm = _escape_html(watermark)
+            watermark_html = f"""
+<div id="wm1" style="position: fixed; top: 28%; left: 8%; opacity: 0.14; font-size: 26pt;
+  color: #888; transform: rotate(-28deg); z-index: 0;">{wm}</div>
+<div id="wm2" style="position: fixed; top: 58%; left: 22%; opacity: 0.12; font-size: 22pt;
+  color: #888; transform: rotate(-28deg); z-index: 0;">{wm}</div>
+"""
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <style>
@@ -202,8 +250,12 @@ body {{ font-family: "Microsoft YaHei", "PingFang SC", sans-serif; font-size: 12
 h1,h2,h3 {{ margin-top: 1.2em; }}
 img {{ max-width: 100%; }}
 code {{ font-family: Consolas, monospace; }}
+.content {{ position: relative; z-index: 1; }}
 </style></head>
-<body><h1>{_escape_html(title)}</h1>{html_body}</body></html>"""
+<body>
+{watermark_html}
+<div class="content"><h1>{_escape_html(title)}</h1>{html_body}</div>
+</body></html>"""
 
         buffer = io.BytesIO()
         result = pisa.CreatePDF(html, dest=buffer, encoding="utf-8")

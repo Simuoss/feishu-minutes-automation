@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core import runtime_config
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,7 @@ class FfmpegClient:
     ) -> Path | None:
         """抽取单帧，失败返回 None（越界或该处无法解码都属预期内情况）。"""
         dest.parent.mkdir(parents=True, exist_ok=True)
-        width = max_width or settings.frame_max_width
+        width = max_width or runtime_config.get_int("FRAME_MAX_WIDTH", 1920)
         cmd = [
             self._ffmpeg,
             "-y",
@@ -165,7 +166,7 @@ class FfmpegClient:
             "-vf",
             f"scale='min({width},iw)':-2",
             "-q:v",
-            str(quality or settings.frame_jpeg_quality),
+            str(quality or runtime_config.get_int("FRAME_JPEG_QUALITY", 3)),
             str(dest),
         ]
         try:
@@ -234,10 +235,18 @@ class FfmpegClient:
         if not video_path.is_file():
             raise FfmpegError(f"待压缩的视频不存在: {video_path}")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        height = max_height if max_height is not None else settings.r2_video_max_height
-        quality = crf if crf is not None else settings.r2_video_crf
-        speed = preset or settings.r2_video_preset
-        limit = timeout if timeout is not None else settings.r2_video_compress_timeout_seconds
+        height = (
+            max_height
+            if max_height is not None
+            else runtime_config.get_int("R2_VIDEO_MAX_HEIGHT", 720)
+        )
+        quality = crf if crf is not None else runtime_config.get_int("R2_VIDEO_CRF", 32)
+        speed = preset or runtime_config.get_str("R2_VIDEO_PRESET", "veryfast")
+        limit = (
+            timeout
+            if timeout is not None
+            else runtime_config.get_float("R2_VIDEO_COMPRESS_TIMEOUT_SECONDS", 21600.0)
+        )
         cmd = [
             self._ffmpeg,
             "-y",

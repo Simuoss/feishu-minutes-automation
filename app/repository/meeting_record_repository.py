@@ -32,6 +32,7 @@ def _to_entity(orm: MeetingRecordORM) -> MeetingRecordEntity:
         transcript_relpath=orm.transcript_relpath,
         downloaded_at=orm.downloaded_at,
         storage_root_relpath=orm.storage_root_relpath,
+        speakers_json=orm.speakers_json,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
     )
@@ -60,6 +61,7 @@ class MeetingRecordRepository:
             transcript_relpath=entity.transcript_relpath,
             downloaded_at=entity.downloaded_at,
             storage_root_relpath=entity.storage_root_relpath,
+            speakers_json=entity.speakers_json,
         )
         self._session.add(orm)
         await self._session.flush()
@@ -86,6 +88,9 @@ class MeetingRecordRepository:
             "downloaded_at",
             "storage_root_relpath",
             "unique_key",
+            "speakers_json",
+            "event_type",
+            "feishu_event_id",
         ):
             value = getattr(entity, field)
             if value is not None:
@@ -93,6 +98,28 @@ class MeetingRecordRepository:
         await self._session.flush()
         await self._session.refresh(orm)
         return _to_entity(orm)
+
+    async def delete_by_ids(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        deleted = 0
+        for record_id in ids:
+            orm = await self._session.get(MeetingRecordORM, record_id)
+            if orm is None:
+                continue
+            await self._session.delete(orm)
+            deleted += 1
+        await self._session.flush()
+        return deleted
+
+    async def list_all_with_token(self) -> list[MeetingRecordEntity]:
+        stmt = (
+            select(MeetingRecordORM)
+            .where(MeetingRecordORM.minute_token.is_not(None))
+            .order_by(MeetingRecordORM.id.desc())
+        )
+        result = await self._session.execute(stmt)
+        return [_to_entity(orm) for orm in result.scalars().all()]
 
     async def upsert_by_minute_token(
         self, entity: MeetingRecordCreateEntity
@@ -126,6 +153,7 @@ class MeetingRecordRepository:
                 downloaded_at=entity.downloaded_at,
                 storage_root_relpath=entity.storage_root_relpath,
                 unique_key=entity.unique_key,
+                speakers_json=entity.speakers_json,
             )
         )
         return updated or existing

@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -12,6 +13,24 @@ from app.service.summary_event_broker import SummaryStatus, summary_broker
 logger = logging.getLogger(__name__)
 
 _SUMMARY_IN_FLIGHT = {SummaryStatus.QUEUED.value, SummaryStatus.GENERATING.value}
+
+
+def _speakers_from_record(record) -> list[str]:
+    raw = getattr(record, "speakers_json", None) if record else None
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error(
+            "会议 speakers_json 解析失败，人员筛选将忽略该会议；怀疑落库时写入了非法 JSON。"
+            "raw=%s",
+            raw[:200],
+        )
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x).strip() for x in data if str(x).strip()]
 
 
 class MeetingListService:
@@ -134,6 +153,7 @@ class MeetingListService:
                         if owned
                         else "NONE"
                     ),
+                    "speakers": _speakers_from_record(record) if owned else [],
                 }
             )
 
@@ -190,7 +210,7 @@ class MeetingListService:
             for oid in owner_ids:
                 user = await uow.users.get_by_id(oid)
                 if user is not None and user.id is not None:
-                    usernames[user.id] = user.username
+                    usernames[user.id] = user.public_display_name()
 
         items: list[dict[str, Any]] = []
         for record in records:
@@ -247,6 +267,7 @@ class MeetingListService:
                     "local_status": record.status or "NONE",
                     "record_id": record.id,
                     "summary_status": summary_status,
+                    "speakers": _speakers_from_record(record),
                 }
             )
 

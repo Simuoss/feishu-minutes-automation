@@ -21,16 +21,18 @@ class ScriptedLlm:
     def __init__(self, *outputs: str) -> None:
         self._outputs = list(outputs)
         self.calls: list[dict[str, object]] = []
+        self._lock = asyncio.Lock()
 
     async def complete(self, system_prompt, user_content, *, images=None, **kwargs):
-        self.calls.append(
-            {
-                "system_prompt": system_prompt,
-                "user_content": user_content,
-                "image_count": len(images or []),
-            }
-        )
-        text = self._outputs.pop(0) if self._outputs else ""
+        async with self._lock:
+            self.calls.append(
+                {
+                    "system_prompt": system_prompt,
+                    "user_content": user_content,
+                    "image_count": len(images or []),
+                }
+            )
+            text = self._outputs.pop(0) if self._outputs else ""
         return LlmCompletion(
             text=text,
             input_tokens=10,
@@ -38,6 +40,42 @@ class ScriptedLlm:
             stop_reason="end_turn",
             attempts=1,
             elapsed_seconds=0.1,
+        )
+
+
+class ConcurrentProbeLlm:
+    """探测业务侧是否真正并发发起多次 complete。"""
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self._lock = asyncio.Lock()
+
+    async def complete(self, system_prompt, user_content, *, images=None, **kwargs):
+        async with self._lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.05)
+        async with self._lock:
+            self.in_flight -= 1
+        # 从清单行解析 figure_id，按「全部非敏感」回包
+        ids: list[str] = []
+        for line in str(user_content).splitlines():
+            line = line.strip()
+            if line.startswith("- fig-"):
+                ids.append(line.split("|", 1)[0].strip().lstrip("- ").strip())
+        payload = {
+            "figures": [
+                {"figure_id": fid, "sensitive": False, "regions": []} for fid in ids
+            ]
+        }
+        return LlmCompletion(
+            text=json.dumps(payload, ensure_ascii=False),
+            input_tokens=10,
+            output_tokens=10,
+            stop_reason="end_turn",
+            attempts=1,
+            elapsed_seconds=0.05,
         )
 
 
@@ -152,8 +190,34 @@ def test_mosaic_file_overwrites_jpeg(tmp_path: Path):
         assert loaded.size == (80, 80)
 
 
+def test_scan_batches_run_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_bool",
+        lambda key, default=None: True if key == "SUMMARY_REDACT" else default,
+    )
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_int",
+        lambda key, default=0: 1 if key == "SUMMARY_FIGURE_BATCH_SIZE" else default,
+    )
+    figs = [_make_figure(tmp_path, f"fig-{i:02d}") for i in range(1, 4)]
+    llm = ConcurrentProbeLlm()
+    outcome = asyncio.run(
+        FigureRedactionService(llm).redact_figures(
+            figs, tmp_path / "work", tmp_path / "originals"
+        )
+    )
+    assert outcome.scanned == 3
+    assert llm.max_in_flight >= 2
+    assert outcome.sensitive == 0
+
+
 def test_redact_skips_when_no_sensitive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("app.service.figure_redaction.settings.summary_redact", True)
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_bool",
+        lambda key, default=None: True if key == "SUMMARY_REDACT" else default,
+    )
     fig = _make_figure(tmp_path, "fig-01")
     before = fig.path.read_bytes()
     scan = json.dumps(
@@ -174,8 +238,16 @@ def test_redact_skips_when_no_sensitive(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_redact_passes_after_verify(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("app.service.figure_redaction.settings.summary_redact", True)
-    monkeypatch.setattr("app.service.figure_redaction.settings.summary_redact_max_attempts", 3)
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_bool",
+        lambda key, default=None: True if key == "SUMMARY_REDACT" else default,
+    )
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_int",
+        lambda key, default=0: 3 if key == "SUMMARY_REDACT_MAX_ATTEMPTS" else (
+            12 if key == "SUMMARY_REDACT_MOSAIC_BLOCK" else default
+        ),
+    )
     fig = _make_figure(tmp_path, "fig-01")
     scan = json.dumps(
         {
@@ -213,8 +285,16 @@ def test_redact_passes_after_verify(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_redact_abandons_after_max_failed_verifies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr("app.service.figure_redaction.settings.summary_redact", True)
-    monkeypatch.setattr("app.service.figure_redaction.settings.summary_redact_max_attempts", 3)
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_bool",
+        lambda key, default=None: True if key == "SUMMARY_REDACT" else default,
+    )
+    monkeypatch.setattr(
+        "app.service.figure_redaction.runtime_config.get_int",
+        lambda key, default=0: 3 if key == "SUMMARY_REDACT_MAX_ATTEMPTS" else (
+            12 if key == "SUMMARY_REDACT_MOSAIC_BLOCK" else default
+        ),
+    )
     fig = _make_figure(tmp_path, "fig-01")
     scan = json.dumps(
         {

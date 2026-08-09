@@ -22,6 +22,7 @@ class MeetingRecordEntity:
     transcript_relpath: str | None
     downloaded_at: int | None
     storage_root_relpath: str | None
+    speakers_json: str | None
     created_at: datetime | None
     updated_at: datetime | None
 
@@ -45,6 +46,7 @@ class MeetingRecordCreateEntity:
     transcript_relpath: str | None = None
     downloaded_at: int | None = None
     storage_root_relpath: str | None = None
+    speakers_json: str | None = None
 
 
 @dataclass
@@ -65,6 +67,9 @@ class MeetingRecordUpdateEntity:
     downloaded_at: int | None = None
     storage_root_relpath: str | None = None
     unique_key: str | None = None
+    speakers_json: str | None = None
+    event_type: str | None = None
+    feishu_event_id: str | None = None
 
 
 @dataclass

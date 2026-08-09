@@ -112,16 +112,24 @@ def encode_oauth_state(
     frontend_origin: str,
     reauth: bool = False,
     user_id: int | None = None,
+    intent: str = "BIND",
+    invite: str | None = None,
 ) -> str:
     """HMAC 签名的 OAuth state，防止伪造 uid 劫持飞书 Token 绑定。"""
+    intent_norm = (intent or "BIND").strip().upper()
+    if intent_norm not in {"LOGIN", "BIND"}:
+        intent_norm = "BIND"
     payload = {
         "r": redirect_uri,
         "f": frontend_origin,
         "reauth": bool(reauth),
+        "intent": intent_norm,
         "exp": int(time.time()) + _OAUTH_STATE_TTL_SECONDS,
     }
     if user_id is not None:
         payload["uid"] = int(user_id)
+    if invite:
+        payload["invite"] = str(invite).strip()
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     sig = hmac.new(_oauth_state_secret(), body.encode("ascii"), hashlib.sha256).hexdigest()

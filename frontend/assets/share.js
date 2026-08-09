@@ -3,6 +3,8 @@ const shareToken = (params.get("s") || "").trim();
 
 const shareState = {
   sessionId: "",
+  trackSessionId: "",
+  visitStartedAt: Date.now(),
   allowExport: false,
   minuteToken: "",
   fullTranscriptText: "",
@@ -13,7 +15,30 @@ const shareState = {
   summaryMarkdown: "",
   scrollMode: localStorage.getItem("minutes_scroll_mode") === "free" ? "free" : "follow",
   activeTab: "summary",
+  videoProgressPeak: 0,
+  lastPlayReportAt: 0,
+  lastPlayReportPct: -1,
+  sessionEnded: false,
+  libraryItems: [],
+  libraryKeys: [],
 };
+
+function ensureTrackSessionId() {
+  const key = `share_track_session:${shareToken}`;
+  let id = sessionStorage.getItem(key) || "";
+  if (!id) {
+    id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(key, id);
+  }
+  shareState.trackSessionId = id;
+  return id;
+}
+
+ensureTrackSessionId();
+shareState.visitStartedAt = Date.now();
 
 const SPEAKER_LINE_RE = /^(.+?)\s+(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s*$/;
 const TIME_ANCHOR_RE = /^\d{1,2}:\d{2}:\d{2}$/;
@@ -63,11 +88,165 @@ async function tryUnlockWithSavedKeys() {
 async function shareFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (shareState.sessionId) headers.set("X-Share-Session", shareState.sessionId);
+  if (shareState.trackSessionId) {
+    headers.set("X-Share-Track-Session", shareState.trackSessionId);
+  }
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const url = path.startsWith("http") ? path : `${API}${path.startsWith("/") ? "" : "/"}${path}`;
   return fetch(url, { ...options, headers });
+}
+
+function trackPayload(extra = {}) {
+  return {
+    session_id: shareState.trackSessionId,
+    started_at: shareState.visitStartedAt,
+    ...extra,
+  };
+}
+
+async function reportTrack(action, extra = {}) {
+  const body = JSON.stringify(trackPayload({ action, ...extra }));
+  try {
+    if (action === "SESSION_END" && typeof navigator.sendBeacon === "function") {
+      const blob = new Blob([body], { type: "application/json" });
+      const ok = navigator.sendBeacon(`${API}/share/${shareToken}/track`, blob);
+      if (ok) return;
+    }
+    await shareFetch(`/share/${shareToken}/track`, {
+      method: "POST",
+      body,
+      keepalive: action === "SESSION_END",
+    });
+  } catch {
+    /* 埋点失败不影响观看 */
+  }
+}
+
+function videoProgressStorageKey() {
+  return `share_video_progress:${shareToken}`;
+}
+
+function loadSavedVideoProgress() {
+  try {
+    const raw = localStorage.getItem(videoProgressStorageKey());
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const sec = Number(data.sec);
+    const pct = Number(data.pct);
+    if (!Number.isFinite(sec) || sec < 5) return null;
+    if (Number.isFinite(pct) && pct >= 95) return null;
+    return { sec, pct: Number.isFinite(pct) ? pct : null };
+  } catch {
+    return null;
+  }
+}
+
+function saveVideoProgress(sec, pct) {
+  try {
+    localStorage.setItem(
+      videoProgressStorageKey(),
+      JSON.stringify({
+        sec: Math.max(0, Math.round(Number(sec) || 0)),
+        pct: Math.max(0, Math.min(100, Math.round(Number(pct) || 0))),
+        updatedAt: Date.now(),
+      })
+    );
+  } catch {
+    /* 私密模式等忽略 */
+  }
+}
+
+function clearSavedVideoProgress() {
+  try {
+    localStorage.removeItem(videoProgressStorageKey());
+  } catch {
+    /* ignore */
+  }
+}
+
+function showResumeHint(sec) {
+  const el = $("#resume-hint");
+  if (!el) return;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const label = `${m}:${String(s).padStart(2, "0")}`;
+  el.innerHTML = `已从上次进度 <strong>${escapeHtml(label)}</strong> 继续
+    <button type="button" class="btn btn-sm" data-resume-restart>${btnContent("skip-back-mini-line", "从头播放")}</button>`;
+  el.classList.remove("hidden");
+  el.querySelector("[data-resume-restart]")?.addEventListener("click", () => {
+    const media = shareState.mediaElement;
+    if (media) media.currentTime = 0;
+    clearSavedVideoProgress();
+    el.classList.add("hidden");
+  });
+}
+
+function bindVideoTracking(video) {
+  if (!video || video.dataset.trackBound === "1") return;
+  video.dataset.trackBound = "1";
+  shareState.mediaElement = video;
+
+  const tryResume = () => {
+    if (video.dataset.resumed === "1") return;
+    const saved = loadSavedVideoProgress();
+    if (!saved) return;
+    const duration = Number(video.duration);
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    const target = Math.min(saved.sec, Math.max(0, duration - 2));
+    if (target < 5) return;
+    video.dataset.resumed = "1";
+    video.currentTime = target;
+    shareState.videoProgressPeak = Math.max(
+      shareState.videoProgressPeak,
+      saved.pct || Math.round((target / duration) * 100)
+    );
+    showResumeHint(target);
+  };
+  video.addEventListener("loadedmetadata", tryResume);
+  if (video.readyState >= 1) tryResume();
+
+  const report = (force = false) => {
+    const duration = Number(video.duration);
+    const current = Number(video.currentTime);
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(current)) return;
+    const pct = Math.max(0, Math.min(100, Math.round((current / duration) * 100)));
+    if (pct > shareState.videoProgressPeak) shareState.videoProgressPeak = pct;
+    const now = Date.now();
+    const crossedBucket =
+      Math.floor(pct / 10) > Math.floor(shareState.lastPlayReportPct / 10);
+    const timed = now - shareState.lastPlayReportAt >= 30_000;
+    if (!force && !crossedBucket && !timed) return;
+    shareState.lastPlayReportAt = now;
+    shareState.lastPlayReportPct = pct;
+    saveVideoProgress(current, pct);
+    reportTrack("PLAY_VIDEO", {
+      video_progress_pct: shareState.videoProgressPeak,
+      detail: {
+        current_sec: Math.round(current),
+        duration_sec: Math.round(duration),
+      },
+    });
+  };
+  video.addEventListener("timeupdate", () => report(false));
+  video.addEventListener("pause", () => report(true));
+  video.addEventListener("ended", () => {
+    shareState.videoProgressPeak = 100;
+    clearSavedVideoProgress();
+    report(true);
+  });
+}
+
+function endVisitSession() {
+  if (shareState.sessionEnded) return;
+  shareState.sessionEnded = true;
+  const endedAt = Date.now();
+  reportTrack("SESSION_END", {
+    ended_at: endedAt,
+    dwell_ms: Math.max(0, endedAt - shareState.visitStartedAt),
+    video_progress_pct: shareState.videoProgressPeak || null,
+  });
 }
 
 function withShareUrl(url) {
@@ -242,17 +421,35 @@ function applyExportVisibility() {
   $("#transcript-export")?.classList.toggle("hidden", !shareState.allowExport);
 }
 
-async function openDetail({ allowKeyRetry = true } = {}) {
+function showShareSkeleton() {
   $("#unlock-view")?.classList.add("hidden");
   $("#detail-view")?.classList.remove("hidden");
-  $("#detail-title").innerHTML = thinkingHtml();
-  $("#detail-meta").textContent = "";
-  showThinking($("#detail-empty"));
-  $("#detail-empty")?.classList.remove("hidden");
-  $("#media-section")?.classList.add("hidden");
-  $("#detail-tabs")?.classList.add("hidden");
-  $("#summary-pane")?.classList.add("hidden");
+  $("#detail-empty")?.classList.add("hidden");
+  $("#resume-hint")?.classList.add("hidden");
+  $("#media-section")?.classList.remove("hidden");
+  $("#media-players").innerHTML = `
+    <div class="skeleton-block skeleton-media" aria-hidden="true"></div>`;
+  $("#detail-tabs")?.classList.remove("hidden");
+  $("#summary-pane")?.classList.remove("hidden");
   $("#transcript-pane")?.classList.add("hidden");
+  $("#summary-empty")?.classList.add("hidden");
+  $("#summary-content").innerHTML = `
+    <div class="skeleton-lines" aria-hidden="true">
+      <div class="skeleton-line w90"></div>
+      <div class="skeleton-line w70"></div>
+      <div class="skeleton-line w85"></div>
+      <div class="skeleton-line w60"></div>
+      <div class="skeleton-line w80"></div>
+    </div>`;
+  $("#summary-export")?.classList.add("hidden");
+}
+
+async function openDetail({ allowKeyRetry = true } = {}) {
+  showShareSkeleton();
+  if (!$("#detail-title")?.textContent?.trim()) {
+    $("#detail-title").innerHTML = thinkingHtml();
+  }
+  $("#detail-meta").textContent = "正在加载…";
 
   // detail / summary 并行，缩短首屏等待
   const detailPromise = shareFetch(`/share/${shareToken}/detail`);
@@ -269,6 +466,10 @@ async function openDetail({ allowKeyRetry = true } = {}) {
   if (!res.ok) {
     $("#detail-view").classList.remove("hidden");
     $("#detail-title").textContent = "加载失败";
+    $("#detail-meta").textContent = "";
+    $("#media-section")?.classList.add("hidden");
+    $("#detail-tabs")?.classList.add("hidden");
+    $("#summary-pane")?.classList.add("hidden");
     $("#detail-empty").textContent = "分享内容不可用";
     $("#detail-empty").classList.remove("hidden");
     return;
@@ -282,7 +483,7 @@ async function openDetail({ allowKeyRetry = true } = {}) {
 
   const metaParts = [];
   if (data.duration_ms) metaParts.push(`时长 ${formatDuration(data.duration_ms)}`);
-  $("#detail-meta").textContent = metaParts.join(" · ");
+  $("#detail-meta").textContent = metaParts.join(" · ") || "";
 
   let hasContent = false;
   let mediaElement = null;
@@ -297,43 +498,98 @@ async function openDetail({ allowKeyRetry = true } = {}) {
         "beforeend",
         `<div class="media-card"><p class="media-name">${label}</p><video controls preload="metadata" src="${mediaUrl}"></video></div>`
       );
-      if (!mediaElement) mediaElement = mediaEl.querySelector("video");
+      if (!mediaElement) {
+        mediaElement = mediaEl.querySelector("video");
+        if (mediaElement) bindVideoTracking(mediaElement);
+      }
     } else if (mf.kind === "audio") {
       mediaEl.insertAdjacentHTML(
         "beforeend",
         `<div class="media-card"><p class="media-name">${label}</p><audio controls preload="metadata" src="${mediaUrl}"></audio></div>`
       );
-      if (!mediaElement) mediaElement = mediaEl.querySelector("audio");
+      if (!mediaElement) {
+        mediaElement = mediaEl.querySelector("audio");
+        shareState.mediaElement = mediaElement;
+      }
     }
   });
   if (hasContent) $("#media-section").classList.remove("hidden");
+  else {
+    $("#media-section")?.classList.add("hidden");
+    mediaEl.innerHTML = "";
+  }
 
   const hasTranscript = Boolean(data.has_transcript);
   if (hasTranscript) {
     shareState.fullTranscriptText = "";
-    $("#transcript-scroll").innerHTML = thinkingHtml({ block: true });
+    $("#transcript-scroll").innerHTML = `
+      <div class="skeleton-lines" aria-hidden="true">
+        <div class="skeleton-line w80"></div>
+        <div class="skeleton-line w95"></div>
+        <div class="skeleton-line w70"></div>
+        <div class="skeleton-line w88"></div>
+      </div>`;
     $("#transcript-section").classList.remove("hidden");
     hasContent = true;
   }
 
-  let hasSummary = false;
-  try {
-    const sumRes = await summaryPromise;
-    if (sumRes.ok) {
+  // 纪要正文路与转写路并行（路内仍：签 URL → R2）
+  const summaryLoad = (async () => {
+    try {
+      const sumRes = await summaryPromise;
+      if (!sumRes.ok) {
+        $("#summary-content").innerHTML = "";
+        $("#summary-empty").classList.remove("hidden");
+        return false;
+      }
       const sum = await sumRes.json();
-      shareState.summaryMarkdown = sum.content || "";
-      hasSummary = Boolean(shareState.summaryMarkdown);
-      $("#summary-content").innerHTML = hasSummary
+      shareState.summaryMarkdown = await resolveTextPayload(sum, {
+        kind: "summary",
+        inlineFetcher: shareFetch,
+        inlinePath: `/share/${shareToken}/summary`,
+      });
+      const ok = Boolean(shareState.summaryMarkdown);
+      $("#summary-content").innerHTML = ok
         ? renderMarkdown(shareState.summaryMarkdown)
         : "";
-      $("#summary-empty").classList.toggle("hidden", hasSummary);
-      if (hasSummary) bindTimeAnchors();
-    } else {
+      $("#summary-empty").classList.toggle("hidden", ok);
+      if (ok) bindTimeAnchors();
+      return ok;
+    } catch {
+      $("#summary-content").innerHTML = "";
       $("#summary-empty").classList.remove("hidden");
+      return false;
     }
-  } catch {
-    $("#summary-empty").classList.remove("hidden");
-  }
+  })();
+
+  const transcriptLoad = hasTranscript
+    ? (async () => {
+        try {
+          const tRes = await shareFetch(`/share/${shareToken}/transcript`);
+          if (!tRes.ok) {
+            $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
+            return;
+          }
+          const tData = await tRes.json();
+          const text = await resolveTextPayload(tData, {
+            kind: "transcript",
+            inlineFetcher: shareFetch,
+            inlinePath: `/share/${shareToken}/transcript`,
+          });
+          shareState.fullTranscriptText = text;
+          if (text) {
+            if (mediaElement) setupDetailSync(mediaElement, text);
+            else renderTranscript(parseTranscript(text));
+          } else {
+            $("#transcript-scroll").innerHTML = `<p class="muted">暂无转写</p>`;
+          }
+        } catch {
+          $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
+        }
+      })()
+    : Promise.resolve();
+
+  const [hasSummary] = await Promise.all([summaryLoad, transcriptLoad]);
 
   document
     .querySelector('.tab-btn[data-tab="transcript"]')
@@ -342,36 +598,134 @@ async function openDetail({ allowKeyRetry = true } = {}) {
     $("#detail-tabs").classList.remove("hidden");
     switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
     hasContent = true;
+  } else {
+    $("#detail-tabs")?.classList.add("hidden");
+    $("#summary-pane")?.classList.add("hidden");
   }
   if (!hasContent) $("#detail-empty").classList.remove("hidden");
   applyExportVisibility();
-
-  if (hasTranscript) {
-    try {
-      const tRes = await shareFetch(`/share/${shareToken}/transcript`);
-      if (tRes.ok) {
-        const tData = await tRes.json();
-        const text = tData.transcript || "";
-        shareState.fullTranscriptText = text;
-        if (text) {
-          if (mediaElement) setupDetailSync(mediaElement, text);
-          else renderTranscript(parseTranscript(text));
-        } else {
-          $("#transcript-scroll").innerHTML = `<p class="muted">暂无转写</p>`;
-        }
-      } else {
-        $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
-      }
-    } catch {
-      $("#transcript-scroll").innerHTML = `<p class="muted">转写加载失败</p>`;
-    }
-  }
 }
 
 function showUnlock(title) {
   $("#detail-view").classList.add("hidden");
   $("#unlock-view").classList.remove("hidden");
   if (title) $("#unlock-title").textContent = title;
+}
+
+function libraryItemTimeMs(item) {
+  // 优先妙记生成时间；兼容旧字段 downloaded_at
+  const raw = item?.create_time || item?.downloaded_at;
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 1e11) return n > 1e12 ? n : n * 1000;
+  const ms = Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function libraryKeyItems() {
+  // 左侧只展示「密钥命中」的分享；最新下载最前
+  return (shareState.libraryItems || [])
+    .filter((item) => item.source === "KEY")
+    .slice()
+    .sort((a, b) => {
+      const dt = libraryItemTimeMs(b) - libraryItemTimeMs(a);
+      if (dt !== 0) return dt;
+      return String(a.title || "").localeCompare(String(b.title || ""), "zh-CN");
+    });
+}
+
+function filteredLibraryItems() {
+  const q = ($("#share-library-filter")?.value || "").trim().toLowerCase();
+  const items = libraryKeyItems();
+  if (!q) return items;
+  return items.filter((item) => {
+    const hay = `${item.title || ""} ${item.minute_token || ""}`.toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+function renderShareLibrary() {
+  const list = $("#share-library-list");
+  const status = $("#share-library-status");
+  if (!list || !status) return;
+
+  const localKeys = loadAccessKeyList(shareToken);
+  if (!localKeys.length) {
+    shareState.libraryItems = [];
+    status.textContent = "尚未记住密钥";
+    list.innerHTML = `<li class="share-library-empty">解锁并勾选「记住密钥」后，这里会列出该密钥可访问的全部课程。</li>`;
+    return;
+  }
+
+  const items = filteredLibraryItems();
+  const total = libraryKeyItems().length;
+  status.textContent =
+    total === 0
+      ? "暂无可访问课程"
+      : items.length === total
+        ? `共 ${total} 门课`
+        : `筛选 ${items.length} / ${total}`;
+
+  if (!items.length) {
+    list.innerHTML = `<li class="share-library-empty">${
+      total === 0
+        ? "当前密钥尚未关联可访问分享，或密钥已失效。"
+        : "没有匹配的课程。"
+    }</li>`;
+    return;
+  }
+
+  list.innerHTML = items
+    .map((item) => {
+      const active = item.share_token === shareToken ? " is-active" : "";
+      const parts = [];
+      const duration = formatDuration(item.duration_ms);
+      if (duration) parts.push(`时长 ${duration}`);
+      const when = formatTime(item.create_time || item.downloaded_at);
+      if (when) parts.push(when);
+      const metaLine = parts.length ? parts.join(" · ") : "暂无时间信息";
+      return `
+      <li>
+        <a class="share-library-item${active}" href="${escapeHtml(item.url)}" title="${escapeHtml(item.title || "")}">
+          <p class="share-library-item-title">${escapeHtml(item.title || "未命名课程")}</p>
+          <p class="share-library-item-meta">${escapeHtml(metaLine)}</p>
+        </a>
+      </li>`;
+    })
+    .join("");
+}
+
+async function loadShareLibrary() {
+  const status = $("#share-library-status");
+  const list = $("#share-library-list");
+  if (!status || !list) return;
+
+  const keys = loadAccessKeyList(shareToken);
+  if (!keys.length) {
+    renderShareLibrary();
+    return;
+  }
+
+  status.textContent = "加载可访问课程…";
+  try {
+    const res = await fetch(`${API}/share/library`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys, share_tokens: [] }),
+    });
+    if (!res.ok) {
+      status.textContent = "列表加载失败";
+      list.innerHTML = `<li class="share-library-empty">暂时无法拉取密钥课程列表，请稍后刷新。</li>`;
+      return;
+    }
+    const data = await res.json();
+    shareState.libraryItems = data.items || [];
+    shareState.libraryKeys = data.keys || [];
+    renderShareLibrary();
+  } catch {
+    status.textContent = "列表加载失败";
+    list.innerHTML = `<li class="share-library-empty">网络异常，无法加载课程列表。</li>`;
+  }
 }
 
 async function unlockWithKey(key, { silent = false, rememberOnSuccess = true } = {}) {
@@ -405,6 +759,8 @@ async function unlockWithKey(key, { silent = false, rememberOnSuccess = true } =
   saveSession(data.share_session);
   shareState.allowExport = Boolean(data.allow_export);
   shareState.minuteToken = data.minute_token;
+  // 记住密钥后立刻刷新左侧权限列表
+  if (remember) loadShareLibrary();
   await openDetail({ allowKeyRetry: false });
   return !$("#detail-view")?.classList.contains("hidden");
 }
@@ -417,7 +773,10 @@ async function unlock() {
 }
 
 async function boot() {
-  const metaRes = await fetch(`${API}/share/${shareToken}/meta`);
+  // 左侧列表与正文并行：有本机密钥时尽早展示权限范围内的课程
+  const libraryPromise = loadShareLibrary();
+
+  const metaRes = await shareFetch(`/share/${shareToken}/meta`);
   if (!metaRes.ok) {
     document.body.innerHTML = `<main class="view"><p class="empty">分享不存在或已失效</p></main>`;
     return;
@@ -435,14 +794,23 @@ async function boot() {
     if (savedSession) {
       saveSession(savedSession);
       await openDetail({ allowKeyRetry: true });
-      if (!$("#detail-view").classList.contains("hidden")) return;
+      if (!$("#detail-view").classList.contains("hidden")) {
+        await libraryPromise;
+        return;
+      }
     }
-    if (await tryUnlockWithSavedKeys()) return;
+    if (await tryUnlockWithSavedKeys()) {
+      await libraryPromise;
+      // try-keys 成功时可能刚确认密钥可用，再刷一次列表
+      loadShareLibrary();
+      return;
+    }
     showUnlock(meta.title);
+    await libraryPromise;
     return;
   }
   saveSession("");
-  await openDetail({ allowKeyRetry: false });
+  await Promise.all([openDetail({ allowKeyRetry: false }), libraryPromise]);
 }
 
 document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -452,6 +820,8 @@ $("#unlock-btn")?.addEventListener("click", unlock);
 $("#share-key-input")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") unlock();
 });
+$("#share-library-refresh")?.addEventListener("click", () => loadShareLibrary());
+$("#share-library-filter")?.addEventListener("input", renderShareLibrary);
 document.querySelectorAll("[data-export-summary]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     try {
@@ -492,5 +862,33 @@ $("#scroll-mode-btn")?.addEventListener("click", () => {
   updateShareScrollModeButton();
 });
 updateShareScrollModeButton();
+
+window.addEventListener("pagehide", endVisitSession);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") endVisitSession();
+});
+
+if (typeof initPassageAsk === "function") {
+  initPassageAsk({
+    storageKey: `ask:share:${shareToken}`,
+    roots: [
+      {
+        el: "#summary-content",
+        kind: "SUMMARY",
+        getText: () => shareState.summaryMarkdown || "",
+      },
+      {
+        el: "#transcript-scroll",
+        kind: "TRANSCRIPT",
+        getText: () => shareState.fullTranscriptText || "",
+      },
+    ],
+    askStream: async (body) =>
+      shareFetch(`/share/${shareToken}/ask/stream`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  });
+}
 
 boot();

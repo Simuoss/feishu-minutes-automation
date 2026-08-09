@@ -10,7 +10,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from app.core.config import settings
+from app.core import runtime_config
 from app.core.resource_key import resource_key
 from app.service.download_progress_store import download_progress_store
 
@@ -21,8 +21,9 @@ T = TypeVar("T")
 
 class DownloadPool:
     def __init__(self, concurrency: int | None = None) -> None:
-        self._concurrency = (
-            settings.download_concurrency if concurrency is None else concurrency
+        self._fixed_concurrency = concurrency
+        self._concurrency = concurrency or runtime_config.get_int(
+            "DOWNLOAD_CONCURRENCY", 5
         )
         self._semaphore: asyncio.Semaphore | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -33,9 +34,25 @@ class DownloadPool:
         self._key_meta: dict[str, tuple[int, str]] = {}
         self._inflight: dict[str, asyncio.Future[Any]] = {}
 
+    def reconfigure_from_runtime(self) -> None:
+        """配置表加载/更新后同步并发上限（空闲时重建信号量）。"""
+        if self._fixed_concurrency is not None:
+            return
+        next_n = max(1, runtime_config.get_int("DOWNLOAD_CONCURRENCY", 5))
+        if next_n == self._concurrency and self._semaphore is not None:
+            return
+        self._concurrency = next_n
+        if self._loop is not None and not self._running and not self._waiting:
+            self._semaphore = asyncio.Semaphore(self._concurrency)
+            logger.info("下载并发池已按配置表调整为 %s", self._concurrency)
+
     def _ensure_loop_state(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.get_running_loop()
         if self._loop is not loop:
+            if self._fixed_concurrency is None:
+                self._concurrency = max(
+                    1, runtime_config.get_int("DOWNLOAD_CONCURRENCY", 5)
+                )
             self._semaphore = asyncio.Semaphore(self._concurrency)
             self._gate = asyncio.Lock()
             self._loop = loop

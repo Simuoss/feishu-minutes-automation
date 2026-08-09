@@ -42,9 +42,10 @@
    * }} options
    */
   function renderSafeMarkdown(markdown, options) {
-    const resolveAssetUrl = options.resolveAssetUrl;
-    const isTimeAnchor = options.isTimeAnchor || (() => false);
-    const timeAnchorSeconds = options.timeAnchorSeconds || (() => null);
+    const opts = options || {};
+    const resolveAssetUrl = opts.resolveAssetUrl || (() => null);
+    const isTimeAnchor = opts.isTimeAnchor || (() => false);
+    const timeAnchorSeconds = opts.timeAnchorSeconds || (() => null);
     const source = String(markdown || "");
 
     const renderer = new marked.Renderer();

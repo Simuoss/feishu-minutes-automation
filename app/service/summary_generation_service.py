@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from app.core import runtime_config
 from app.core.config import settings
 from app.integrations.llm.messages_client import (
     AnthropicMessagesClient,
@@ -296,7 +297,7 @@ class SummaryGenerationService:
             "figure_redacted": 0,
             "figure_abandoned": 0,
         }
-        if not figures or not settings.summary_redact:
+        if not figures or not runtime_config.get_bool("SUMMARY_REDACT", True):
             return figures, empty_meta
 
         broker.update(
@@ -379,7 +380,7 @@ class SummaryGenerationService:
     ) -> list[PreparedFigure]:
         """有视频时先让模型挑出想看的时刻，再抽成截图；任何环节失败都退回纯文字纪要。"""
         broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
-        if not settings.summary_illustrate:
+        if not runtime_config.get_bool("SUMMARY_ILLUSTRATE", True):
             return []
 
         video_path = self._storage.find_video_path(
@@ -438,6 +439,13 @@ class SummaryGenerationService:
             stage=f"根据抽帧判断是否共享屏幕并规划截图（上限 {figure_limit} 张）",
         )
         broker.clear_plan_items()
+        logger.info(
+            "开始调用模型规划配图 token=%s samples=%s transcript_chars=%s limit=%s",
+            minute_token,
+            len(sample_frames),
+            len(transcript),
+            figure_limit,
+        )
         plan = await self._illustration.plan_screenshots(
             transcript,
             sample_frames=sample_frames,
@@ -549,7 +557,7 @@ class SummaryGenerationService:
                 "纪要因模型输出上限被截断 token=%s，结尾段落可能不完整；"
                 "当前 LLM_MAX_TOKENS=%s（0 表示按平台上限），怀疑转写过长或模型提前停写",
                 minute_token,
-                settings.llm_max_tokens,
+                runtime_config.get_int("LLM_MAX_TOKENS", 0),
             )
 
         broker.update(percent=90, stage="校正时间锚点")
@@ -715,6 +723,10 @@ class SummaryGenerationService:
                     error_message=result.error_message,
                     finished=True,
                 )
+                if result.status == SummaryStatus.COMPLETED.value:
+                    r2_media_service.spawn_finalize_after_summary(
+                        minute_token, owner_user_id=owner_user_id
+                    )
                 return result
 
             if mode == "REDACT":
@@ -810,6 +822,10 @@ class SummaryGenerationService:
                 error_message=result.error_message,
                 finished=True,
             )
+            if result.status == SummaryStatus.COMPLETED.value:
+                r2_media_service.spawn_finalize_after_summary(
+                    minute_token, owner_user_id=owner_user_id
+                )
             return result
         except Exception as exc:
             await update_job(

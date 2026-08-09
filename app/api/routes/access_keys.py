@@ -97,10 +97,23 @@ async def list_access_key_logs(
                 access_key_id=log.access_key_id,
                 share_id=log.share_id,
                 minute_token=log.minute_token,
+                meeting_title=log.meeting_title,
                 action=log.action,
                 ip=log.ip,
                 user_agent=log.user_agent,
                 created_at=log.created_at,
+                session_id=log.session_id,
+                referer=log.referer,
+                device_type=log.device_type,
+                browser=log.browser,
+                os=log.os,
+                started_at=log.started_at,
+                ended_at=log.ended_at,
+                dwell_ms=log.dwell_ms,
+                video_progress_pct=log.video_progress_pct,
+                result=log.result,
+                fail_reason=log.fail_reason,
+                detail_json=log.detail_json,
             )
             for log in logs
         ]

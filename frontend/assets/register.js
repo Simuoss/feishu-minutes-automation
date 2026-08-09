@@ -47,11 +47,18 @@ async function tryRegister() {
   location.replace(next.startsWith("/") ? next : "/");
 }
 
+function startFeishuSso() {
+  const invite = ($("#invite-code-input")?.value || "").trim();
+  // 邀请码可选：仅当服务端开启 FEISHU_SSO_REQUIRE_INVITE 时必需
+  location.href = feishuLoginUrl(invite ? { invite } : {});
+}
+
 if (getUserJwt()) {
   location.replace(next.startsWith("/") ? next : "/");
 }
 
 $("#register-btn").addEventListener("click", tryRegister);
+$("#feishu-sso-btn")?.addEventListener("click", startFeishuSso);
 ["#invite-code-input", "#register-username-input", "#register-password-input"].forEach(
   (sel) => {
     const el = $(sel);
@@ -61,4 +68,4 @@ $("#register-btn").addEventListener("click", tryRegister);
     });
   }
 );
-($("#invite-code-input")?.value ? $("#register-username-input") : $("#invite-code-input"))?.focus();
+$("#feishu-sso-btn")?.focus();

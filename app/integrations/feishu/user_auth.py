@@ -110,9 +110,11 @@ class FeishuUserAuthClient:
         self._store.clear(self._user_id)
         self._cache_from_stored(None)
 
-    async def exchange_code(
-        self, code: str, *, redirect_uri: str | None = None
+    @staticmethod
+    async def exchange_code_stateless(
+        code: str, *, redirect_uri: str | None = None
     ) -> dict[str, Any]:
+        """换票但不落库：供 SSO 登录先取 open_id 再建号/绑定。"""
         body = {
             "grant_type": "authorization_code",
             "client_id": settings.feishu_app_id,
@@ -120,9 +122,45 @@ class FeishuUserAuthClient:
             "code": code,
             "redirect_uri": redirect_uri or settings.feishu_oauth_redirect_uri,
         }
-        data = await self._post_token(body)
+        return await FeishuUserAuthClient._post_token_static(body)
+
+    async def exchange_code(
+        self, code: str, *, redirect_uri: str | None = None
+    ) -> dict[str, Any]:
+        data = await self.exchange_code_stateless(code, redirect_uri=redirect_uri)
         self._persist_token_response(data)
         return data
+
+    def persist_token_response(self, data: dict[str, Any]) -> None:
+        self._persist_token_response(data)
+
+    @staticmethod
+    async def fetch_user_info(access_token: str) -> dict[str, Any]:
+        if not access_token:
+            raise RuntimeError("缺少 access_token，无法拉取飞书用户资料")
+        url = f"{settings.feishu_api_base.rstrip('/')}/open-apis/authen/v1/user_info"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                logger.error(
+                    "飞书 user_info 响应非 JSON status=%s，怀疑网关或端点异常",
+                    response.status_code,
+                )
+                raise RuntimeError(
+                    f"拉取飞书用户资料失败 (HTTP {response.status_code})"
+                ) from exc
+        if payload.get("code") not in (0, None) and "data" not in payload:
+            # 部分成功响应 code=0；失败时拒绝
+            if payload.get("code") != 0:
+                detail = payload.get("msg") or payload.get("error") or payload
+                logger.error("拉取飞书用户资料失败：%s", detail)
+                raise RuntimeError(f"拉取飞书用户资料失败: {detail}")
+        return payload
 
     async def refresh_access_token(self) -> dict[str, Any]:
         stored = await self._load_stored()
@@ -226,6 +264,17 @@ class FeishuUserAuthClient:
         )
 
     async def _post_token(self, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._post_token_static(body)
+        except RuntimeError:
+            logger.error(
+                "换取 user_access_token 失败 user_id=%s，该用户无法调用妙记 API 直至重新授权",
+                self._user_id,
+            )
+            raise
+
+    @staticmethod
+    async def _post_token_static(body: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 settings.feishu_oauth_token_url,
@@ -249,10 +298,9 @@ class FeishuUserAuthClient:
                 or payload.get("error")
             )
             logger.error(
-                "换取 user_access_token 失败 code=%s detail=%s user_id=%s",
+                "换取 user_access_token 失败 code=%s detail=%s",
                 payload.get("code"),
                 detail,
-                self._user_id,
             )
             raise RuntimeError(f"OAuth 失败 [{payload.get('code')}]: {detail}")
 

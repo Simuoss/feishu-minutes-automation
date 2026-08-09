@@ -79,21 +79,28 @@ async function createKey() {
     return;
   }
   const data = await res.json();
+  rememberAccessKeyPlaintext(data.id, data.plaintext_key);
   box.classList.remove("hidden");
   box.innerHTML = `明文密钥仅显示一次，请立即复制保存：<code>${escapeHtml(data.plaintext_key)}</code>
     <button type="button" class="btn btn-sm" id="copy-plaintext">${btnContent("file-copy-line", "复制")}</button>`;
   $("#copy-plaintext")?.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(data.plaintext_key);
+    await copyTextToClipboard(data.plaintext_key);
   });
   $("#key-name").value = "";
   await loadKeys();
 }
 
+function closeLogsDialog() {
+  $("#key-logs-dialog")?.classList.add("hidden");
+}
+
 async function loadLogs(keyId, name) {
-  $("#logs-panel").classList.remove("hidden");
-  $("#logs-key-name").textContent = name;
-  const res = await apiFetch(`/access-keys/${keyId}/logs?limit=100`);
+  const dialog = $("#key-logs-dialog");
   const list = $("#logs-list");
+  $("#logs-key-name").textContent = name || `#${keyId}`;
+  list.innerHTML = `<li class="meeting-item">${thinkingHtml({ block: true })}</li>`;
+  dialog?.classList.remove("hidden");
+  const res = await apiFetch(`/access-keys/${keyId}/logs?limit=100`);
   if (!res.ok) {
     list.innerHTML = `<li class="meeting-item"><span class="meeting-meta">加载失败</span></li>`;
     return;
@@ -104,17 +111,7 @@ async function loadLogs(keyId, name) {
     list.innerHTML = `<li class="meeting-item"><span class="meeting-meta">暂无访问记录</span></li>`;
     return;
   }
-  list.innerHTML = items
-    .map(
-      (log) => `
-      <li class="meeting-item">
-        <div class="meeting-body">
-          <p class="meeting-title">${escapeHtml(log.action)} · ${escapeHtml(log.minute_token)}</p>
-          <p class="meeting-meta">${formatTime(log.created_at)} · IP ${escapeHtml(log.ip || "-")} · share #${log.share_id}</p>
-        </div>
-      </li>`
-    )
-    .join("");
+  list.innerHTML = renderAccessLogGroups(items, { showShareId: true });
 }
 
 $("#key-expires").value = defaultExpiresLocal();
@@ -131,6 +128,15 @@ $("#keys-list").addEventListener("click", async (e) => {
   }
   const logs = e.target.closest("[data-logs]");
   if (logs) await loadLogs(logs.dataset.logs, logs.dataset.name);
+});
+
+$("#key-logs-dialog")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-close-logs]")) closeLogsDialog();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#key-logs-dialog")?.classList.contains("hidden")) {
+    closeLogsDialog();
+  }
 });
 
 bindAdminNav();

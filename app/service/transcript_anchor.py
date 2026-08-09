@@ -74,6 +74,19 @@ def parse_transcript_segments(transcript: str) -> list[TranscriptSegment]:
     return segments
 
 
+def extract_unique_speakers(transcript: str) -> list[str]:
+    """按转写出现顺序去重参会发言人，供列表筛选。"""
+    names: list[str] = []
+    seen: set[str] = set()
+    for seg in parse_transcript_segments(transcript or ""):
+        name = (seg.speaker or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
 def align_summary_anchors(summary: str, segments: list[TranscriptSegment]) -> AnchorAlignment:
     """把纪要中的时间锚点吸附到最接近的真实段落起点。"""
     if not segments:
