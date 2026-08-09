@@ -1,4 +1,8 @@
+# 密钥与环境（保留 example）
 .env
+.env.*
+!.env.example
+
 .venv/
 venv/
 __pycache__/
@@ -23,9 +27,30 @@ data/*.db-shm
 data/*.db-wal
 data/meetings/
 data/_probe_frames/
+data/_dedup_probe/
+data/_*/
+data/feishu_user_token.json
 
 *.log
 .tmp/
 
-# 本地临时探针（勿再提交）
+# 本地临时探针 / 冒烟 / 一次性脚本（勿再提交）
 scripts/_probe_*
+scripts/_smoke_*
+scripts/_upload_*
+scripts/_check_*
+scripts/_clear_*
+scripts/_import_*
+scripts/_summary_*.md
+
+# Tunnel / 凭证类（示例用 *.example.*）
+cloudflared.yml
+cloudflared.yaml
+cloudflared*.yml
+cloudflared*.yaml
+!cloudflared*.example.yml
+!cloudflared*.example.yaml
+*.pem
+*.key
+credentials.json
+**/credentials-file.json
