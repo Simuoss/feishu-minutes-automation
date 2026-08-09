@@ -1,8 +1,7 @@
 """删除指定妙记本地/DB 状态，并模拟 minutes.minute.generated_v1 重新触发下载。
 
 用法:
-  .venv/Scripts/python.exe scripts/_e2e_replay_minute.py
-  .venv/Scripts/python.exe scripts/_e2e_replay_minute.py --token REDACTED_MINUTE_TOKEN --owner 1
+  .venv/Scripts/python.exe scripts/_e2e_replay_minute.py --token <minute_token> --owner 1
 """
 
 from __future__ import annotations
@@ -260,8 +259,8 @@ async def trigger_via_http(minute_token: str, owner_user_id: int) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--token", default="REDACTED_MINUTE_TOKEN")
-    parser.add_argument("--owner", type=int, default=1)
+    parser.add_argument("--token", required=True, help="飞书妙记 minute_token")
+    parser.add_argument("--owner", type=int, required=True, help="本地 owner_user_id")
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument(
         "--purge-only",

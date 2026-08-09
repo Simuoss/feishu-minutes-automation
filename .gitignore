@@ -9,8 +9,23 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 本地 SQLite 与会议落盘（含 WAL/SHM 旁路文件）
 data/app.db
+data/app.db-shm
+data/app.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
 data/meetings/
 data/_probe_frames/
+
 *.log
 .tmp/
+
+# 本地临时探针（勿再提交）
+scripts/_probe_*
