@@ -26,6 +26,8 @@ class SummaryRunEntity:
     figure_redacted: int | None
     figure_abandoned: int | None
     run_mode: str | None
+    scene: str | None
+    scene_reason: str | None
     generated_at: str | None
     redacted_at: str | None
     r2_synced_at: str | None
@@ -58,6 +60,8 @@ class SummaryRunUpsertEntity:
     figure_redacted: int | None = None
     figure_abandoned: int | None = None
     run_mode: str | None = None
+    scene: str | None = None
+    scene_reason: str | None = None
     generated_at: str | None = None
     redacted_at: str | None = None
     r2_synced_at: str | None = None

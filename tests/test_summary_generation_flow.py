@@ -51,11 +51,35 @@ MODEL_OUTPUT = """# 测试课程
 """
 
 
+SCENE_LECTURE = json.dumps(
+    {"scene": "LECTURE", "reason": "两人，一方占九成发言，全程在讲概念"},
+    ensure_ascii=False,
+)
+
+SCENE_MEETING = json.dumps(
+    {"scene": "MEETING", "reason": "三人发言分布分散，在过进度并派活"},
+    ensure_ascii=False,
+)
+
+
+def _is_scene_prompt(system_prompt: str) -> bool:
+    """场景判定那次调用的提示词，用它路由假模型的返回。"""
+    return "LECTURE" in str(system_prompt) and "MEETING" in str(system_prompt)
+
+
 class FakeLlm:
-    def __init__(self, text: str | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        text: str | None = None,
+        error: Exception | None = None,
+        scene: str = SCENE_LECTURE,
+    ) -> None:
         self._text = text
         self._error = error
+        self._scene = scene
         self.calls = 0
+        self.scene_calls = 0
+        self.write_prompts: list[str] = []
 
     async def complete(
         self,
@@ -67,7 +91,18 @@ class FakeLlm:
         on_restart=None,
         **kwargs,
     ):
+        if _is_scene_prompt(system_prompt):
+            self.scene_calls += 1
+            return LlmCompletion(
+                text=self._scene,
+                input_tokens=200,
+                output_tokens=30,
+                stop_reason="end_turn",
+                attempts=1,
+                elapsed_seconds=1.0,
+            )
         self.calls += 1
+        self.write_prompts.append(str(system_prompt))
         if on_attempt is not None:
             on_attempt(1, 1)
         if self._error is not None:
@@ -118,6 +153,76 @@ def test_generate_writes_summary_and_snaps_anchor(tmp_path: Path):
     assert meta["anchor_aligned"] == 1
     assert meta["input_tokens"] == 1000
     assert meta["truncated"] is False
+
+
+def test_detected_scene_selects_prompt_and_lands_in_meta(tmp_path: Path):
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    storage = _make_storage(tmp_path)
+    llm = FakeLlm(MODEL_OUTPUT, scene=SCENE_MEETING)
+
+    asyncio.run(SummaryGenerationService(storage=storage, llm=llm).generate(
+        TOKEN, owner_user_id=OWNER
+    ))
+
+    assert llm.scene_calls == 1
+    # 判定为会议就必须换成会议模板，不能仍按讲课那套写
+    assert "会议纪要" in llm.write_prompts[0]
+    assert "课后复习" not in llm.write_prompts[0]
+
+    meta = storage.read_summary(TOKEN, owner_user_id=OWNER)["meta"]
+    assert meta["scene"] == "MEETING"
+    assert "三人" in meta["scene_reason"]
+
+
+def test_write_mode_reuses_previous_scene(tmp_path: Path):
+    """重跑成文不该再花一次调用去判定同一份转写。"""
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    storage = _make_storage(tmp_path)
+    llm = FakeLlm(MODEL_OUTPUT, scene=SCENE_MEETING)
+    service = SummaryGenerationService(storage=storage, llm=llm)
+
+    asyncio.run(service.generate(TOKEN, owner_user_id=OWNER))
+    asyncio.run(service.generate(TOKEN, owner_user_id=OWNER, mode="WRITE", force=True))
+
+    assert llm.scene_calls == 1
+    assert llm.calls == 2
+    assert storage.read_summary(TOKEN, owner_user_id=OWNER)["meta"]["scene"] == "MEETING"
+
+
+def test_unrecognized_scene_aborts_without_writing(tmp_path: Path):
+    """判定失败宁可整场失败，也不猜一套模板写下去。"""
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    storage = _make_storage(tmp_path)
+    llm = FakeLlm(
+        MODEL_OUTPUT,
+        scene=json.dumps({"scene": "TRAINING", "reason": "像培训"}, ensure_ascii=False),
+    )
+
+    result = asyncio.run(SummaryGenerationService(storage=storage, llm=llm).generate(
+        TOKEN, owner_user_id=OWNER
+    ))
+
+    assert result.status == SummaryStatus.FAILED.value
+    assert "场景判定失败" in (result.error_message or "")
+    # 不该继续浪费一次成文调用，也不该留下半成品
+    assert llm.calls == 0
+    assert storage.read_summary(TOKEN, owner_user_id=OWNER) is None
+
+
+def test_non_json_scene_output_aborts(tmp_path: Path):
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    storage = _make_storage(tmp_path)
+    llm = FakeLlm(MODEL_OUTPUT, scene="这应该是一节课吧")
+
+    result = asyncio.run(SummaryGenerationService(storage=storage, llm=llm).generate(
+        TOKEN, owner_user_id=OWNER
+    ))
+
+    assert result.status == SummaryStatus.FAILED.value
+    channel = summary_broker.get(TOKEN, owner_user_id=OWNER)
+    assert channel is not None
+    assert channel.status == SummaryStatus.FAILED.value
+    assert llm.calls == 0
 
 
 def test_generate_skips_when_summary_exists(tmp_path: Path):

@@ -2,7 +2,6 @@ import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Literal
 
 from app.core import runtime_config
@@ -26,6 +25,11 @@ from app.service.figure_audit import (
 from app.service.figure_redaction import FigureRedactionService, RedactionOutcome
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.r2_media_service import r2_media_service
+from app.service.scene_detection import (
+    SceneDecision,
+    SceneDetectionError,
+    SceneDetector,
+)
 from app.service.summary_event_broker import SummaryStatus, summary_broker
 from app.service.summary_generation_pool import (
     SummaryGenerationPool,
@@ -36,14 +40,18 @@ from app.service.summary_illustration import (
     SummaryIllustrationService,
     figure_limit_for_duration,
 )
+from app.service.summary_scene import (
+    Scene,
+    load_summary_prompt,
+    normalize_scene,
+    scene_label,
+)
 from app.service.transcript_anchor import (
     align_summary_anchors,
     parse_transcript_segments,
 )
 
 logger = logging.getLogger(__name__)
-
-PROMPT_PATH = Path(__file__).parent / "prompts" / "lecture_summary.md"
 
 SummaryRunMode = Literal["FULL", "REDACT", "WRITE", "R2_SYNC"]
 VALID_MODES = {"FULL", "REDACT", "WRITE", "R2_SYNC"}
@@ -66,7 +74,7 @@ class SummaryResult:
 
 
 class SummaryGenerationService:
-    """基于课堂转写生成 Markdown 纪要。"""
+    """基于转写生成 Markdown 纪要，按场景选用讲课或会议模板。"""
 
     def __init__(
         self,
@@ -80,12 +88,11 @@ class SummaryGenerationService:
         self._pool = pool or summary_generation_pool
         self._illustration = SummaryIllustrationService(self._llm, ffmpeg or ffmpeg_client)
         self._redaction = FigureRedactionService(self._llm)
-
-    def _load_prompt(self) -> str:
-        prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        if not prompt.strip():
-            raise RuntimeError(f"纪要提示词文件为空，无法生成: {PROMPT_PATH}")
-        return prompt
+        # 判定只是一次短分类，独立走快模型；调用方注入了客户端时（测试、替换实现）沿用注入的那个
+        self._scene_detector = SceneDetector(
+            llm
+            or AnthropicMessagesClient(model=settings.llm_scene_model or settings.llm_model)
+        )
 
     async def generate(
         self,
@@ -379,6 +386,7 @@ class SummaryGenerationService:
         minute_token: str,
         transcript: str,
         *,
+        scene: Scene,
         owner_user_id: int,
     ) -> list[PreparedFigure]:
         """有视频时先让模型挑出想看的时刻，再抽成截图；任何环节失败都退回纯文字纪要。"""
@@ -453,6 +461,7 @@ class SummaryGenerationService:
             transcript,
             sample_frames=sample_frames,
             limit=figure_limit,
+            scene=scene,
             on_attempt=lambda attempt, total: broker.mark_attempt(
                 attempt,
                 total,
@@ -503,17 +512,20 @@ class SummaryGenerationService:
         figure_prepared: int,
         redaction_meta: dict[str, int],
         mode: str,
+        decision: SceneDecision,
         owner_user_id: int,
     ) -> SummaryResult:
         broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
         segments = parse_transcript_segments(transcript)
-        system_prompt = self._load_prompt()
+        system_prompt = load_summary_prompt(decision.scene)
         user_content = f"<transcript>\n{transcript}\n</transcript>"
         images: list[LlmImage] = []
-        writing_label = "模型生成中"
+        writing_label = f"模型生成中（{decision.label}纪要）"
         if figures:
             writing_label = f"模型正在读 {len(figures)} 张截图，首个字出现前约需 1~2 分钟"
-            system_prompt = f"{system_prompt}\n\n{self._illustration.load_addendum()}"
+            system_prompt = (
+                f"{system_prompt}\n\n{self._illustration.load_addendum(decision.scene)}"
+            )
             user_content = (
                 f"{self._illustration.build_manifest(figures)}\n\n{user_content}"
             )
@@ -595,6 +607,8 @@ class SummaryGenerationService:
             "figure_for_writing": len(figures),
             "figure_used": len(used_figures),
             "run_mode": mode,
+            "scene": decision.scene,
+            "scene_reason": decision.reason,
             **redaction_meta,
         }
         # 合并已有脱敏统计（WRITE 模式未重跑脱敏时保留上次）
@@ -621,10 +635,11 @@ class SummaryGenerationService:
         broker.complete(alignment.text, meta)
 
         logger.info(
-            "纪要生成完成 token=%s mode=%s 用时 %.0fs / %d 次尝试 / 输出 %d 字 / "
+            "纪要生成完成 token=%s mode=%s scene=%s 用时 %.0fs / %d 次尝试 / 输出 %d 字 / "
             "锚点 %d 个（吸附 %d）/ 配图 %d 张（备选 %d）",
             minute_token,
             mode,
+            decision.scene,
             completion.elapsed_seconds,
             completion.attempts,
             len(alignment.text),
@@ -646,6 +661,126 @@ class SummaryGenerationService:
             elapsed_seconds=completion.elapsed_seconds,
             mode=mode,
         )
+
+    async def _rerun_redaction_only(
+        self,
+        minute_token: str,
+        *,
+        job_id: int,
+        owner_user_id: int,
+    ) -> SummaryResult:
+        """REDACT：只对已有配图重跑脱敏，正文原样保留，因此不需要判定场景。"""
+        from app.service.pipeline_job_service import update_job
+
+        broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
+        figures = await self._load_prepared_figures(
+            minute_token, owner_user_id=owner_user_id
+        )
+        if not figures:
+            message = "没有可脱敏的配图，请先完整生成一次带图纪要"
+            broker.fail(message)
+            await update_job(
+                job_id,
+                status="FAILED",
+                stage="FAILED",
+                error_message=message,
+                finished=True,
+            )
+            return SummaryResult(
+                minute_token=minute_token,
+                status=SummaryStatus.FAILED.value,
+                error_message=message,
+                mode="REDACT",
+            )
+
+        figure_prepared = len(figures)
+        # 用原图目录覆盖 assets 再跑，避免对已打码图二次扫描
+        originals = self._storage.get_redaction_originals_dir(
+            minute_token, owner_user_id=owner_user_id
+        )
+        restored: list[PreparedFigure] = []
+        for fig in figures:
+            original = originals / f"{fig.figure_id}.jpg"
+            if original.is_file():
+                shutil.copy2(original, fig.path)
+            if fig.path.is_file():
+                restored.append(fig)
+        figures, redaction_meta = await self._run_redaction(
+            minute_token, restored, owner_user_id=owner_user_id
+        )
+        await self._persist_manifest(
+            minute_token, figures, owner_user_id=owner_user_id
+        )
+        # 更新 meta 中的脱敏统计，保留正文
+        existing = await self._storage.read_summary_async(
+            minute_token, owner_user_id=owner_user_id
+        )
+        content = (existing or {}).get("content") or ""
+        meta = dict((existing or {}).get("meta") or {})
+        meta.update(redaction_meta)
+        meta["redacted_at"] = datetime.now(timezone.utc).isoformat()
+        meta["run_mode"] = "REDACT"
+        if existing is not None:
+            await self._storage.save_summary_async(
+                minute_token, content, meta, owner_user_id=owner_user_id
+            )
+        broker.complete(content, meta)
+        logger.info(
+            "仅脱敏完成 token=%s 扫描 %d / 打码 %d / 放弃 %d",
+            minute_token,
+            redaction_meta["figure_scanned"],
+            redaction_meta["figure_redacted"],
+            redaction_meta["figure_abandoned"],
+        )
+        await update_job(
+            job_id, status="COMPLETED", stage="DONE", percent=100.0, finished=True
+        )
+        return SummaryResult(
+            minute_token=minute_token,
+            status=SummaryStatus.COMPLETED.value,
+            char_count=len(content),
+            figure_planned=figure_prepared,
+            figure_used=len(figures),
+            mode="REDACT",
+        )
+
+    async def _resolve_scene(
+        self,
+        minute_token: str,
+        transcript: str,
+        mode: str,
+        *,
+        owner_user_id: int,
+    ) -> SceneDecision:
+        """定下这份转写用哪套模板。WRITE 重跑时沿用上次判定，不重复分类。"""
+        broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
+        if mode == "WRITE":
+            existing = await self._storage.read_summary_async(
+                minute_token, owner_user_id=owner_user_id
+            )
+            prev_meta = (existing or {}).get("meta") or {}
+            saved = normalize_scene(prev_meta.get("scene"))
+            if saved is not None:
+                logger.info(
+                    "沿用上次判定的场景 %s，本次不重复分类 token=%s", saved, minute_token
+                )
+                return SceneDecision(
+                    scene=saved,
+                    reason=str(prev_meta.get("scene_reason") or "").strip(),
+                )
+
+        broker.update(percent=6, stage="判断这场录音是讲课还是会议")
+        decision = await self._scene_detector.detect(
+            transcript,
+            on_attempt=lambda attempt, total: broker.mark_attempt(
+                attempt, total, label="判断这场录音是讲课还是会议"
+            ),
+        )
+        broker.update(
+            percent=6,
+            stage=f"场景判定为{decision.label}：{decision.reason or '未说明依据'}",
+        )
+        return decision
 
     async def _generate_in_pool(
         self,
@@ -693,10 +828,53 @@ class SummaryGenerationService:
             figure_prepared = 0
             figures: list[PreparedFigure] = []
 
+            if mode == "REDACT":
+                return await self._rerun_redaction_only(
+                    minute_token,
+                    job_id=job_id,
+                    owner_user_id=owner_user_id,
+                )
+
+            # 判定必须早于抽帧：判错场景整份纪要都会跑偏，而且要失败就趁早失败，
+            # 不该让用户等完几分钟抽帧再看到错误
+            await update_job(job_id, stage="DETECT_SCENE", percent=6.0)
+            try:
+                decision = await self._resolve_scene(
+                    minute_token, transcript, mode, owner_user_id=owner_user_id
+                )
+            except (SceneDetectionError, LlmRequestError) as exc:
+                message = f"场景判定失败，未生成纪要：{exc}"
+                logger.error(
+                    "场景判定失败 token=%s，不猜场景直接中止：%s", minute_token, exc
+                )
+                broker.fail(message)
+                await update_job(
+                    job_id,
+                    status="FAILED",
+                    stage="FAILED",
+                    error_message=message,
+                    finished=True,
+                )
+                return SummaryResult(
+                    minute_token=minute_token,
+                    status=SummaryStatus.FAILED.value,
+                    error_message=message,
+                    mode=mode,
+                )
+            logger.info(
+                "本场按%s纪要生成 token=%s，判定依据：%s",
+                scene_label(decision.scene),
+                minute_token,
+                decision.reason or "（未说明）",
+            )
+
             if mode == "FULL":
                 try:
                     figures = await self._prepare_figures(
-                        minute_token, transcript, owner_user_id=owner_user_id
+                        minute_token,
+                        transcript,
+                        scene=decision.scene,
+                        owner_user_id=owner_user_id,
                     )
                 except LlmRequestError as exc:
                     logger.warning(
@@ -723,6 +901,7 @@ class SummaryGenerationService:
                     figure_prepared=figure_prepared,
                     redaction_meta=redaction_meta,
                     mode=mode,
+                    decision=decision,
                     owner_user_id=owner_user_id,
                 )
                 await update_job(
@@ -739,77 +918,6 @@ class SummaryGenerationService:
                     )
                 return result
 
-            if mode == "REDACT":
-                figures = await self._load_prepared_figures(
-                    minute_token, owner_user_id=owner_user_id
-                )
-                if not figures:
-                    message = "没有可脱敏的配图，请先完整生成一次带图纪要"
-                    broker.fail(message)
-                    await update_job(
-                        job_id,
-                        status="FAILED",
-                        stage="FAILED",
-                        error_message=message,
-                        finished=True,
-                    )
-                    return SummaryResult(
-                        minute_token=minute_token,
-                        status=SummaryStatus.FAILED.value,
-                        error_message=message,
-                        mode=mode,
-                    )
-                figure_prepared = len(figures)
-                # 用原图目录覆盖 assets 再跑，避免对已打码图二次扫描
-                originals = self._storage.get_redaction_originals_dir(
-                    minute_token, owner_user_id=owner_user_id
-                )
-                restored: list[PreparedFigure] = []
-                for fig in figures:
-                    original = originals / f"{fig.figure_id}.jpg"
-                    if original.is_file():
-                        shutil.copy2(original, fig.path)
-                    if fig.path.is_file():
-                        restored.append(fig)
-                figures, redaction_meta = await self._run_redaction(
-                    minute_token, restored, owner_user_id=owner_user_id
-                )
-                await self._persist_manifest(
-                    minute_token, figures, owner_user_id=owner_user_id
-                )
-                # 更新 meta 中的脱敏统计，保留正文
-                existing = await self._storage.read_summary_async(
-                    minute_token, owner_user_id=owner_user_id
-                )
-                content = (existing or {}).get("content") or ""
-                meta = dict((existing or {}).get("meta") or {})
-                meta.update(redaction_meta)
-                meta["redacted_at"] = datetime.now(timezone.utc).isoformat()
-                meta["run_mode"] = mode
-                if existing is not None:
-                    await self._storage.save_summary_async(
-                        minute_token, content, meta, owner_user_id=owner_user_id
-                    )
-                broker.complete(content, meta)
-                logger.info(
-                    "仅脱敏完成 token=%s 扫描 %d / 打码 %d / 放弃 %d",
-                    minute_token,
-                    redaction_meta["figure_scanned"],
-                    redaction_meta["figure_redacted"],
-                    redaction_meta["figure_abandoned"],
-                )
-                await update_job(
-                    job_id, status="COMPLETED", stage="DONE", percent=100.0, finished=True
-                )
-                return SummaryResult(
-                    minute_token=minute_token,
-                    status=SummaryStatus.COMPLETED.value,
-                    char_count=len(content),
-                    figure_planned=figure_prepared,
-                    figure_used=len(figures),
-                    mode=mode,
-                )
-
             # WRITE：跳过抽帧与脱敏，直接成文
             figures = await self._load_prepared_figures(
                 minute_token, owner_user_id=owner_user_id
@@ -822,6 +930,7 @@ class SummaryGenerationService:
                 figure_prepared=figure_prepared,
                 redaction_meta=redaction_meta,
                 mode=mode,
+                decision=decision,
                 owner_user_id=owner_user_id,
             )
             await update_job(

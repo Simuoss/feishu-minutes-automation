@@ -300,9 +300,12 @@ function switchDetailTab(tab) {
   $("#transcript-pane").classList.toggle("hidden", tab !== "transcript");
 }
 
+const SCENE_LABELS = { LECTURE: "讲课纪要", MEETING: "会议纪要" };
+
 function summaryMetaText(meta) {
   if (!meta) return "";
   const parts = [];
+  if (meta.scene) parts.push(SCENE_LABELS[meta.scene] || meta.scene);
   if (meta.generated_at) parts.push(`生成于 ${formatTime(meta.generated_at)}`);
   if (meta.summary_chars) parts.push(`${meta.summary_chars} 字`);
   if (meta.anchor_total) {
@@ -336,6 +339,11 @@ const SUMMARY_STAGES = [
     desc: "整理发言段落，为成文与锚点做准备",
   },
   {
+    id: "scene",
+    title: "判定场景",
+    desc: "看开头与发言分布，判断这场是讲课还是会议",
+  },
+  {
     id: "figures",
     title: "准备配图",
     desc: "抽帧判断共享屏幕，规划并筛选截图",
@@ -365,6 +373,7 @@ function resolveSummaryStageId(data) {
   const percent = Number(data.percent) || 0;
   if (/排队|槽位|同账号|压缩分享/.test(stage)) return "queue";
   if (/解析转写/.test(stage) || (percent > 0 && percent < 6)) return "parse";
+  if (/场景|讲课还是会议/.test(stage)) return "scene";
   if (/敏感|打码|脱敏|扫描 .* 张截图/.test(stage) || (percent >= 32 && percent < 40)) {
     return "redact";
   }
@@ -453,6 +462,7 @@ function renderMetrics(metrics) {
     .join(" · ");
   root.innerHTML = `
     <div class="metrics-grid metrics-grid-sidebar">
+      <div><span class="metrics-label">场景</span><span>${escapeHtml(SCENE_LABELS[metrics.scene] || metrics.scene || "—")}</span></div>
       <div><span class="metrics-label">Token</span><span>${escapeHtml(tokens)}</span></div>
       <div><span class="metrics-label">耗时</span><span>${metrics.elapsed_seconds != null ? `${Math.round(metrics.elapsed_seconds)}s` : "—"}</span></div>
       <div><span class="metrics-label">锚点</span><span>${metrics.anchor_total || 0}（校正 ${metrics.anchor_aligned || 0}，可疑 ${metrics.anchor_suspicious_count || 0}）</span></div>

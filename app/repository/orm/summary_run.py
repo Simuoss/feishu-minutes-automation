@@ -34,6 +34,8 @@ class SummaryRunORM(Base):
     figure_redacted: Mapped[int | None] = mapped_column(Integer, nullable=True)
     figure_abandoned: Mapped[int | None] = mapped_column(Integer, nullable=True)
     run_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scene: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scene_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     redacted_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     r2_synced_at: Mapped[str | None] = mapped_column(String(64), nullable=True)

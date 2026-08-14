@@ -80,6 +80,8 @@ class SummaryMetaData(BaseModel):
     figure_redacted: int | None = None
     figure_abandoned: int | None = None
     run_mode: str | None = None
+    scene: str | None = None
+    scene_reason: str | None = None
     redacted_at: str | None = None
     r2_synced_at: str | None = None
     r2_uploaded: int | None = None
@@ -117,6 +119,7 @@ class SummaryMetricsResponse(BaseModel):
     figure_abandoned: int | None = None
     generated_at: str | None = None
     run_mode: str | None = None
+    scene: str | None = None
     r2_asset_count: int | None = None
 
 

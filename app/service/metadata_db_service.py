@@ -149,6 +149,8 @@ def summary_run_to_meta(entity: SummaryRunEntity) -> dict[str, Any]:
         "figure_redacted": entity.figure_redacted,
         "figure_abandoned": entity.figure_abandoned,
         "run_mode": entity.run_mode,
+        "scene": entity.scene,
+        "scene_reason": entity.scene_reason,
         "generated_at": entity.generated_at,
         "redacted_at": entity.redacted_at,
         "r2_synced_at": entity.r2_synced_at,
@@ -209,6 +211,8 @@ def meta_to_summary_upsert(
         if isinstance(meta.get("figure_abandoned"), int)
         else None,
         run_mode=meta.get("run_mode"),
+        scene=meta.get("scene"),
+        scene_reason=meta.get("scene_reason"),
         generated_at=meta.get("generated_at"),
         redacted_at=meta.get("redacted_at"),
         r2_synced_at=meta.get("r2_synced_at"),

@@ -120,6 +120,7 @@ async def _build_metrics(
         figure_abandoned=meta.get("figure_abandoned"),
         generated_at=meta.get("generated_at"),
         run_mode=meta.get("run_mode"),
+        scene=meta.get("scene"),
         r2_asset_count=r2_count,
     )
 

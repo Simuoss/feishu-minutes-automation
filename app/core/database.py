@@ -42,6 +42,8 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "summary_runs": [
         ("owner_user_id", "INTEGER"),
+        ("scene", "VARCHAR(32)"),
+        ("scene_reason", "TEXT"),
     ],
     "r2_sync_states": [
         ("owner_user_id", "INTEGER"),

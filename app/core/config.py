@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.stepfun.com/step_plan"
     llm_api_key: str = ""
     llm_model: str = "step-explore"
+    # 场景判定是一次轻量分类，用快模型省掉主模型动辄数分钟的排队；留空则回落到 llm_model
+    llm_scene_model: str = "step-3.7-flash"
 
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"

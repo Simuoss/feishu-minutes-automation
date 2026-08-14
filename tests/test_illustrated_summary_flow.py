@@ -105,12 +105,26 @@ pip 指向了旧解释器。
 """
 
 
-class ScriptedLlm:
-    """按调用顺序返回预设输出，并记录每次调用的入参。"""
+SCENE_LECTURE = json.dumps(
+    {"scene": "LECTURE", "reason": "一人讲，一人应答"}, ensure_ascii=False
+)
 
-    def __init__(self, *outputs: str) -> None:
+SCENE_MEETING = json.dumps(
+    {"scene": "MEETING", "reason": "多人轮流过进度并派活"}, ensure_ascii=False
+)
+
+
+class ScriptedLlm:
+    """按调用顺序返回预设输出，并记录每次调用的入参。
+
+    场景判定那一次单独应答、不占用脚本顺序，这样各用例仍按业务调用次数断言。
+    """
+
+    def __init__(self, *outputs: str, scene: str = SCENE_LECTURE) -> None:
         self._outputs = list(outputs)
+        self._scene = scene
         self.calls: list[dict[str, object]] = []
+        self.scene_calls = 0
 
     async def complete(
         self,
@@ -123,6 +137,16 @@ class ScriptedLlm:
         on_restart=None,
         **kwargs,
     ):
+        if "LECTURE" in str(system_prompt) and "MEETING" in str(system_prompt):
+            self.scene_calls += 1
+            return LlmCompletion(
+                text=self._scene,
+                input_tokens=200,
+                output_tokens=30,
+                stop_reason="end_turn",
+                attempts=1,
+                elapsed_seconds=1.0,
+            )
         self.calls.append(
             {
                 "system_prompt": system_prompt,
@@ -448,6 +472,23 @@ def test_screen_activity_check_cleans_up_samples(tmp_path: Path):
     asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
 
     assert not storage.get_frames_work_dir(TOKEN, owner_user_id=OWNER).exists()
+
+
+def test_meeting_scene_switches_both_illustration_prompts(tmp_path: Path):
+    """判定为会议时，规划截图与看图成文都要换成会议版提示词。"""
+    summary_broker.clear(TOKEN, owner_user_id=OWNER)
+    storage = _make_storage(tmp_path)
+    llm = ScriptedLlm(PLAN_OUTPUT, SCAN_CLEAN, WRITE_OUTPUT, scene=SCENE_MEETING)
+
+    asyncio.run(_service(storage, llm, FakeFfmpeg()).generate(TOKEN, owner_user_id=OWNER))
+
+    plan_prompt = str(llm.calls[0]["system_prompt"])
+    write_prompt = str(llm.calls[2]["system_prompt"])
+    assert "被逐条讨论的材料页" in plan_prompt
+    assert "指示代词密集处" not in plan_prompt
+    # 会议版配图附则强调屏幕上的数字，且明确不给行动项配图
+    assert "不要为「行动项」配图" in write_prompt
+    assert "「你问过的问题」" not in write_prompt
 
 
 def test_regenerate_clears_previous_assets(tmp_path: Path):

@@ -30,6 +30,8 @@ def _to_entity(orm: SummaryRunORM) -> SummaryRunEntity:
         figure_redacted=orm.figure_redacted,
         figure_abandoned=orm.figure_abandoned,
         run_mode=orm.run_mode,
+        scene=orm.scene,
+        scene_reason=orm.scene_reason,
         generated_at=orm.generated_at,
         redacted_at=orm.redacted_at,
         r2_synced_at=orm.r2_synced_at,
@@ -60,6 +62,8 @@ def _apply_upsert(orm: SummaryRunORM, entity: SummaryRunUpsertEntity) -> None:
     orm.figure_redacted = entity.figure_redacted
     orm.figure_abandoned = entity.figure_abandoned
     orm.run_mode = entity.run_mode
+    orm.scene = entity.scene
+    orm.scene_reason = entity.scene_reason
     orm.generated_at = entity.generated_at
     orm.redacted_at = entity.redacted_at
     orm.r2_synced_at = entity.r2_synced_at

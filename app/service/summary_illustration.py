@@ -21,12 +21,13 @@ from app.service.frame_selection import (
     analyze_frame,
     select_distinct_frames,
 )
+from app.service.summary_scene import Scene, load_scene_prompt
 from app.service.transcript_anchor import format_seconds, parse_seconds
 
 logger = logging.getLogger(__name__)
 
-PLAN_PROMPT_PATH = Path(__file__).parent / "prompts" / "screenshot_plan.md"
-ADDENDUM_PROMPT_PATH = Path(__file__).parent / "prompts" / "illustrated_addendum.md"
+PLAN_PROMPT_BASE = "screenshot_plan"
+ADDENDUM_PROMPT_BASE = "illustrated_addendum"
 
 PLAN_MAX_TOKENS = 8192
 
@@ -298,8 +299,8 @@ class SummaryIllustrationService:
         self._ffmpeg = ffmpeg
 
     @staticmethod
-    def load_addendum() -> str:
-        return ADDENDUM_PROMPT_PATH.read_text(encoding="utf-8")
+    def load_addendum(scene: Scene) -> str:
+        return load_scene_prompt(ADDENDUM_PROMPT_BASE, scene)
 
     async def probe_video(self, video_path: Path) -> VideoInfo:
         return await self._ffmpeg.probe(video_path)
@@ -350,6 +351,7 @@ class SummaryIllustrationService:
         *,
         sample_frames: list[Path],
         limit: int,
+        scene: Scene,
         on_attempt: Callable[[int, int], None] | None = None,
         on_candidate: Callable[[str, str], None] | None = None,
     ) -> ScreenshotPlan:
@@ -380,7 +382,7 @@ class SummaryIllustrationService:
                 items=[],
             )
 
-        prompt = PLAN_PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = load_scene_prompt(PLAN_PROMPT_BASE, scene)
         user_content = (
             f"下面附上 {len(images)} 张从录像中均匀抽取的画面样本。"
             f"请**只根据这些画面**判断 screen_shared；转写仅用于挑选配图时间点。\n"
