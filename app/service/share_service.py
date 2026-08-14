@@ -140,7 +140,9 @@ class ShareService:
             access_key_id=access_key_id,
             owner_user_id=owner_user_id,
         )
-        if self._storage.read_meta(minute_token, owner_user_id=owner_user_id) is None:
+        if await self._storage.read_meta_async(
+            minute_token, owner_user_id=owner_user_id
+        ) is None:
             raise LookupError("本地未找到该会议，请先下载")
 
         entity = ShareCreateEntity(
@@ -192,7 +194,7 @@ class ShareService:
             created_now: dict[str, ShareEntity] = {}
             now = utc_now_ms()
             for minute_token in ordered_tokens:
-                if self._storage.read_meta(
+                if await self._storage.read_meta_async(
                     minute_token, owner_user_id=owner_id
                 ) is None:
                     results.append(
@@ -292,7 +294,7 @@ class ShareService:
                 meta = {}
             else:
                 meta = (
-                    self._storage.read_meta(
+                    await self._storage.read_meta_async(
                         share.minute_token, owner_user_id=share.owner_user_id
                     )
                     or {}
@@ -518,7 +520,7 @@ class ShareService:
                 )
             raise LookupError("分享不存在或已失效")
         meta = (
-            self._storage.read_meta(
+            await self._storage.read_meta_async(
                 share.minute_token, owner_user_id=share.owner_user_id
             )
             or {}
@@ -804,6 +806,7 @@ class ShareService:
 
         def _library_item_from_meta(
             share: ShareEntity,
+            meta: dict,
             *,
             source: str,
             matched_key_prefix: str | None,
@@ -811,12 +814,6 @@ class ShareService:
         ) -> ShareLibraryItemEntity | None:
             if share.owner_user_id is None:
                 return None
-            meta = (
-                self._storage.read_meta(
-                    share.minute_token, owner_user_id=share.owner_user_id
-                )
-                or {}
-            )
             title = str(meta.get("title") or share.minute_token)
             raw_duration = meta.get("duration_ms")
             duration_ms = (
@@ -869,7 +866,7 @@ class ShareService:
             create_time = str(info.create_time).strip()
             meta["create_time"] = create_time
             try:
-                self._storage.write_meta(
+                await self._storage.write_meta_async(
                     share.minute_token,
                     meta,
                     owner_user_id=share.owner_user_id,
@@ -906,7 +903,7 @@ class ShareService:
             if share.owner_user_id is None:
                 continue
             meta = (
-                self._storage.read_meta(
+                await self._storage.read_meta_async(
                     share.minute_token, owner_user_id=share.owner_user_id
                 )
                 or {}
@@ -914,6 +911,7 @@ class ShareService:
             create_time = await _ensure_create_time(share, meta)
             item = _library_item_from_meta(
                 share,
+                meta,
                 source=source,
                 matched_key_prefix=matched_prefix,
                 create_time=create_time,
@@ -999,7 +997,10 @@ class ShareService:
             owner_id = share.owner_user_id if share is not None else None
         if owner_id is not None:
             meta = (
-                self._storage.read_meta(minute_token, owner_user_id=owner_id) or {}
+                await self._storage.read_meta_async(
+                    minute_token, owner_user_id=owner_id
+                )
+                or {}
             )
             raw = meta.get("title")
             if raw:

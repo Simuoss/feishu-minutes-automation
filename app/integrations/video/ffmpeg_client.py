@@ -7,6 +7,8 @@
 import asyncio
 import json
 import logging
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -230,8 +232,9 @@ class FfmpegClient:
         crf: int | None = None,
         preset: str | None = None,
         timeout: float | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> Path:
-        """重度压缩为分享用 mp4（原片保留，输出另存）。"""
+        """在线程里跑 ffmpeg，避免占用事件循环；通过 -progress 回报百分比。"""
         if not video_path.is_file():
             raise FfmpegError(f"待压缩的视频不存在: {video_path}")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -247,11 +250,20 @@ class FfmpegClient:
             if timeout is not None
             else runtime_config.get_float("R2_VIDEO_COMPRESS_TIMEOUT_SECONDS", 21600.0)
         )
+        duration = 0.0
+        try:
+            info = await self.probe(video_path)
+            duration = max(0.0, info.duration_seconds)
+        except FfmpegError:
+            duration = 0.0
         cmd = [
             self._ffmpeg,
             "-y",
+            "-nostats",
             "-loglevel",
             "error",
+            "-progress",
+            "pipe:1",
             "-i",
             str(video_path),
             "-vf",
@@ -271,7 +283,9 @@ class FfmpegClient:
             str(dest),
         ]
         try:
-            code, _stdout, stderr = await _run(cmd, limit)
+            code, stderr = await asyncio.to_thread(
+                _compress_in_thread, cmd, dest, limit, duration, on_progress
+            )
         except FileNotFoundError as exc:
             raise FfmpegError(
                 f"找不到 ffmpeg 可执行文件（当前配置 FFMPEG_PATH={self._ffmpeg}），"
@@ -281,9 +295,60 @@ class FfmpegClient:
             dest.unlink(missing_ok=True)
             raise FfmpegError(
                 "分享视频压缩失败，怀疑源文件损坏、无视频流或磁盘空间不足: "
-                f"{stderr.decode('utf-8', errors='replace')[:400]}"
+                f"{stderr[:400]}"
             )
         return dest
+
+
+def parse_ffmpeg_out_time_ms(line: str) -> int | None:
+    text = line.strip()
+    if not text.startswith("out_time_ms="):
+        return None
+    raw = text.split("=", 1)[1].strip()
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _compress_in_thread(
+    cmd: list[str],
+    dest: Path,
+    timeout: float,
+    duration: float,
+    on_progress: Callable[[float], None] | None,
+) -> tuple[int, str]:
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        raise
+    last_report = -1.0
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            ms = parse_ffmpeg_out_time_ms(line)
+            if ms is None or duration <= 0 or on_progress is None:
+                continue
+            percent = min(99.0, (ms / 1_000_000.0) / duration * 100.0)
+            if percent >= last_report + 1:
+                last_report = percent
+                on_progress(percent)
+        process.wait(timeout=max(1.0, timeout))
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        dest.unlink(missing_ok=True)
+        raise FfmpegError(f"分享视频压缩超过 {timeout:.0f}s 被终止") from None
+    stderr = ""
+    if process.stderr is not None:
+        stderr = process.stderr.read()
+    return process.returncode or 0, stderr
 
 
 ffmpeg_client = FfmpegClient()

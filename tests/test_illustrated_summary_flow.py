@@ -10,6 +10,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+import pytest
 from PIL import Image, ImageDraw
 
 from app.integrations.llm.messages_client import LlmCompletion, LlmImage
@@ -20,6 +21,14 @@ from app.service.summary_generation_service import SummaryGenerationService
 
 TOKEN = "obillus0001"
 OWNER = 1
+
+
+@pytest.fixture(autouse=True)
+def _disable_r2_for_unit_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.service.r2_media_service.R2MediaService.enabled",
+        lambda self: False,
+    )
 
 TRANSCRIPT = """2026-07-21 20:58:04 CST|1小时 3秒
 

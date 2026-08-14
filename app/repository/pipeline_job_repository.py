@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from datetime import datetime, timezone
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.data_model.entity.pipeline_job import (
@@ -64,6 +66,7 @@ class PipelineJobRepository:
             "attempt",
             "max_attempts",
             "error_message",
+            "started_at",
             "finished_at",
             "broker_updated_at",
             "mode",
@@ -110,3 +113,41 @@ class PipelineJobRepository:
         )
         result = await self._session.execute(stmt)
         return [_to_entity(orm) for orm in result.scalars().all()]
+
+    async def list_by_statuses(
+        self,
+        statuses: list[str],
+        *,
+        job_types: list[str] | None = None,
+    ) -> list[PipelineJobEntity]:
+        stmt = (
+            select(PipelineJobORM)
+            .where(PipelineJobORM.status.in_(statuses))
+            .order_by(PipelineJobORM.id.asc())
+        )
+        if job_types:
+            stmt = stmt.where(PipelineJobORM.job_type.in_(job_types))
+        result = await self._session.execute(stmt)
+        return [_to_entity(orm) for orm in result.scalars().all()]
+
+    async def claim(self, job_id: int) -> PipelineJobEntity | None:
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        stmt = (
+            update(PipelineJobORM)
+            .where(
+                PipelineJobORM.id == job_id,
+                PipelineJobORM.status == "QUEUED",
+            )
+            .values(
+                status="RUNNING",
+                stage="START",
+                started_at=now,
+                broker_updated_at=now,
+            )
+        )
+        result = await self._session.execute(stmt)
+        if int(result.rowcount or 0) == 0:
+            return None
+        await self._session.flush()
+        orm = await self._session.get(PipelineJobORM, job_id)
+        return _to_entity(orm) if orm else None

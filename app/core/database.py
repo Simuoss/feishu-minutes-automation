@@ -32,6 +32,7 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("downloaded_at", "BIGINT"),
         ("storage_root_relpath", "VARCHAR(512)"),
         ("speakers_json", "TEXT"),
+        ("create_time", "VARCHAR(64)"),
     ],
     "shares": [
         ("owner_user_id", "INTEGER"),

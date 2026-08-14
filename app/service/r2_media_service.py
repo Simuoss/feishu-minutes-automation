@@ -586,13 +586,21 @@ class R2MediaService:
         return lock
 
     async def ensure_share_video(
-        self, minute_token: str, *, owner_user_id: int
+        self,
+        minute_token: str,
+        *,
+        owner_user_id: int,
+        on_progress: Any | None = None,
     ) -> bool:
         """压缩本地视频并上传 R2。成功返回 True；不在此处删除原片。"""
         if not self.enabled():
             return False
         async with self._video_lock(minute_token, owner_user_id=owner_user_id):
-            meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
+            # 必须用 async meta：同步 read/write_meta 会堵死事件循环，
+            # 导致 ffmpeg.communicate 无法排空管道而永久卡住。
+            meta = await self.read_meta_async(
+                minute_token, owner_user_id=owner_user_id
+            )
             video_meta = dict(meta.get("video") or {})
             if video_meta.get("status") == VIDEO_STATUS_READY and video_meta.get("key"):
                 return True
@@ -616,13 +624,17 @@ class R2MediaService:
                 "error": None,
             }
             meta["video"] = video_meta
-            self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+            await self.write_meta_async(
+                minute_token, meta, owner_user_id=owner_user_id
+            )
 
             tmp_root: Path | None = None
             try:
                 tmp_root = Path(tempfile.mkdtemp(prefix="r2-share-"))
                 tmp_path = tmp_root / "share.mp4"
-                await ffmpeg_client.compress_for_share(source, tmp_path)
+                await ffmpeg_client.compress_for_share(
+                    source, tmp_path, on_progress=on_progress
+                )
                 # Windows 上 ffmpeg 偶发仍短暂占用输出文件，稍候再读上传
                 await asyncio.sleep(0.2)
                 etag = await r2_client.upload_file(
@@ -630,7 +642,9 @@ class R2MediaService:
                     video_meta["key"],
                     content_type="video/mp4",
                 )
-                meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
+                meta = await self.read_meta_async(
+                    minute_token, owner_user_id=owner_user_id
+                )
                 meta["video"] = {
                     "status": VIDEO_STATUS_READY,
                     "key": video_meta["key"],
@@ -639,21 +653,27 @@ class R2MediaService:
                     "error": None,
                     "source_name": source.name,
                 }
-                self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+                await self.write_meta_async(
+                    minute_token, meta, owner_user_id=owner_user_id
+                )
                 logger.info(
                     "分享压缩视频已上传 R2 token=%s（原片保留至纪要完成后清理）",
                     minute_token,
                 )
                 return True
             except (FfmpegError, R2ClientError, OSError) as exc:
-                meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
+                meta = await self.read_meta_async(
+                    minute_token, owner_user_id=owner_user_id
+                )
                 meta["video"] = {
                     "status": VIDEO_STATUS_FAILED,
                     "key": video_meta.get("key"),
                     "updated_at": utc_now_ms(),
                     "error": str(exc),
                 }
-                self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+                await self.write_meta_async(
+                    minute_token, meta, owner_user_id=owner_user_id
+                )
                 logger.error(
                     "分享视频压缩/上传 R2 失败 token=%s，保留本地原片以便重试: %s",
                     minute_token,
@@ -717,13 +737,18 @@ class R2MediaService:
     def spawn_share_video(self, minute_token: str, *, owner_user_id: int) -> None:
         if not self.enabled():
             return
-        owner = owner_user_id
-        task: asyncio.Task[object] = asyncio.create_task(
-            self.ensure_share_video(minute_token, owner_user_id=owner)
+        from app.core.loop_bridge import schedule_on_main_loop
+        from app.service.pipeline_queue import JOB_SHARE_VIDEO, enqueue_job
+
+        schedule_on_main_loop(
+            enqueue_job(
+                minute_token,
+                owner_user_id=owner_user_id,
+                job_type=JOB_SHARE_VIDEO,
+            ),
+            what="enqueue-share-video",
         )
-        _r2_video_tasks.add(task)
-        task.add_done_callback(_r2_video_tasks.discard)
-        logger.info("已排队压缩并上传分享视频到 R2 token=%s", minute_token)
+        logger.info("已入队压缩并上传分享视频到 R2 token=%s", minute_token)
 
     def spawn_finalize_after_summary(
         self, minute_token: str, *, owner_user_id: int
@@ -779,7 +804,9 @@ class R2MediaService:
                 "uploaded_at": utc_now_ms(),
             }
             meta["text"] = text_meta
-            self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+            await self.write_meta_async(
+                minute_token, meta, owner_user_id=owner_user_id
+            )
             logger.info("纪要正文已同步到 R2 token=%s key=%s", minute_token, key)
             return True
         except Exception as exc:  # noqa: BLE001
@@ -828,7 +855,9 @@ class R2MediaService:
                 "uploaded_at": utc_now_ms(),
             }
             meta["text"] = text_meta
-            self.write_meta(minute_token, meta, owner_user_id=owner_user_id)
+            await self.write_meta_async(
+                minute_token, meta, owner_user_id=owner_user_id
+            )
             logger.info("转写文本已同步到 R2 token=%s key=%s", minute_token, key)
             return True
         except Exception as exc:  # noqa: BLE001

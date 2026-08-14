@@ -42,6 +42,7 @@ class SummaryProgressResponse(BaseModel):
     llm_slots_busy: int = 0
     llm_slots_free: int = 0
     llm_waiters: int = 0
+    job_type: str | None = None
 
 
 class ProgressBatchItem(BaseModel):

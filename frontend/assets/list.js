@@ -157,6 +157,16 @@ function canViewLocal(item) {
   return Boolean(item.is_local || item.local_status === "COMPLETED");
 }
 
+function needsSummaryCatchup(item) {
+  if (!canViewLocal(item)) return false;
+  const status = normalizeSummaryStatus(item.summary_status);
+  return status !== "READY" && status !== "GENERATING" && status !== "QUEUED";
+}
+
+function missingSummaryLocals() {
+  return state.allItems.filter((item) => needsSummaryCatchup(item));
+}
+
 function localBadge(item) {
   if (item.is_local || item.local_status === "COMPLETED") {
     return `<span class="badge badge-local">已同步</span>`;
@@ -614,6 +624,7 @@ function applyLocalView({ resetPage = false } = {}) {
   const start = state.pageIndex * state.pageSize;
   state.items = filtered.slice(start, start + state.pageSize);
   renderList();
+  updateDownloadBtn();
   updatePager(pageCount);
   const sortLabel = state.sortOrder === "asc" ? "正序（旧→新）" : "倒序（新→旧）";
   const syncHint = state.syncing
@@ -669,13 +680,22 @@ function renderList() {
     const viewBtn = canOpen
       ? `<button type="button" class="btn btn-sm btn-view" data-view="${item.minute_token}"${ownerAttr}>${btnContent("eye-line", "查看")}</button>`
       : "";
+    const catchupBtn = needsSummaryCatchup(item)
+      ? `<button type="button" class="btn btn-sm btn-catchup" data-catchup="${item.minute_token}"${ownerAttr}>${btnContent(
+          "restart-line",
+          normalizeSummaryStatus(item.summary_status) === "FAILED" ? "重试纪要" : "补跑纪要"
+        )}</button>`
+      : "";
+    const rowActions = viewBtn || catchupBtn
+      ? `<div class="meeting-row-actions">${catchupBtn}${viewBtn}</div>`
+      : "";
 
     li.innerHTML = `
       <input type="checkbox" data-token="${item.minute_token}" ${state.selected.has(item.minute_token) ? "checked" : ""} />
       <div class="meeting-body">
         <div class="meeting-title-row">
           <p class="${titleClass}" data-token="${item.minute_token}" data-open="${canOpen}"${ownerAttr}>${escapeHtml(title)}${localBadge(item)}${summaryBadge(item)}</p>
-          ${viewBtn}
+          ${rowActions}
         </div>
         <p class="meeting-meta">${escapeHtml(meta)}</p>
         ${extra ? `<p class="meeting-desc">${escapeHtml(extra)}</p>` : ""}
@@ -705,6 +725,13 @@ function renderList() {
       openMeeting(btn.dataset.view, btn.dataset.owner);
     });
   });
+
+  list.querySelectorAll(".btn-catchup").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      catchupOneSummary(btn.dataset.catchup, btn.dataset.owner);
+    });
+  });
 }
 
 function selectedLocalItems() {
@@ -727,6 +754,8 @@ function updateDownloadBtn() {
   const locals = selectedLocalItems();
   // 纪要只能基于本地转写生成，没下载的选中项不算数
   $("#batch-summary-btn").disabled = locals.length === 0;
+  const catchupBtn = $("#catchup-summary-btn");
+  if (catchupBtn) catchupBtn.disabled = missingSummaryLocals().length === 0;
   const shareBtn = $("#share-selected-btn");
   if (shareBtn) shareBtn.disabled = locals.length === 0;
   updateSelectAllBtnLabel();
@@ -1211,8 +1240,11 @@ function classifyBatchSummaryTargets(items) {
   return { missing, existing, inFlight, localCount: items.length };
 }
 
-async function enqueueSummary(token, force) {
-  const res = await apiFetch(`/meetings/${token}/summary`, {
+async function enqueueSummary(item, force) {
+  const token = typeof item === "string" ? item : item.minute_token;
+  const owner = typeof item === "string" ? null : ownerUserIdFromItem(item);
+  const qs = owner != null ? `?owner_user_id=${encodeURIComponent(owner)}` : "";
+  const res = await apiFetch(`/meetings/${token}/summary${qs}`, {
     method: "POST",
     body: JSON.stringify({ force }),
   });
@@ -1226,14 +1258,18 @@ async function enqueueSummary(token, force) {
   return res.json();
 }
 
-async function runBatchSummary({ tokens, force }) {
-  if (!tokens.length) {
+async function runBatchSummary({ items, tokens, force }) {
+  const targets = items
+    || (tokens || []).map((token) => state.allItems.find((row) => row.minute_token === token) || { minute_token: token });
+  if (!targets.length) {
     setStatus("没有需要生成的会议");
     return;
   }
 
   const btn = $("#batch-summary-btn");
   btn.disabled = true;
+  const catchupBtn = $("#catchup-summary-btn");
+  if (catchupBtn) catchupBtn.disabled = true;
   $("#download-btn").disabled = true;
   $("#select-all-btn").disabled = true;
   $("#share-selected-btn").disabled = true;
@@ -1243,13 +1279,14 @@ async function runBatchSummary({ tokens, force }) {
   const errors = [];
 
   try {
-    for (let i = 0; i < tokens.length; i += 1) {
-      const token = tokens[i];
-      setStatus(`正在提交纪要 ${i + 1}/${tokens.length}…`);
+    for (let i = 0; i < targets.length; i += 1) {
+      const item = targets[i];
+      const token = item.minute_token;
+      setStatus(`正在提交纪要 ${i + 1}/${targets.length}…`);
       try {
-        await enqueueSummary(token, force);
+        await enqueueSummary(item, force);
         ok += 1;
-        const row = state.allItems.find((item) => item.minute_token === token);
+        const row = state.allItems.find((row) => row.minute_token === token);
         if (row) row.summary_status = "QUEUED";
       } catch (e) {
         failed += 1;
@@ -1300,9 +1337,33 @@ async function batchGenerateSummaries() {
   }
 
   await runBatchSummary({
-    tokens: plan.missing.map((item) => item.minute_token),
+    items: plan.missing,
     force: false,
   });
+}
+
+async function catchupMissingSummaries() {
+  const missing = missingSummaryLocals();
+  if (!missing.length) {
+    setStatus("没有已下载但未生成纪要的会议");
+    return;
+  }
+  await runBatchSummary({ items: missing, force: false });
+}
+
+async function catchupOneSummary(token, ownerId) {
+  const row = state.allItems.find((item) => item.minute_token === token);
+  const item = row || { minute_token: token, owner_id: ownerId };
+  try {
+    setStatus(`正在补跑 ${meetingTitle(item)}…`);
+    await enqueueSummary(item, false);
+    if (row) row.summary_status = "QUEUED";
+    saveListCache(state.allItems);
+    applyLocalView();
+    setStatus("已提交补跑，可在列表徽章查看进度");
+  } catch (e) {
+    setStatus(`补跑失败：${e.message}`);
+  }
 }
 
 function showAuthFailure(message) {
@@ -1532,6 +1593,7 @@ bindFilterTagClicks($("#owner-filter-tags"), () => applyLocalView({ resetPage: t
 $("#select-all-btn").addEventListener("click", selectAllVisible);
 $("#download-btn").addEventListener("click", downloadSelected);
 $("#batch-summary-btn").addEventListener("click", batchGenerateSummaries);
+$("#catchup-summary-btn")?.addEventListener("click", catchupMissingSummaries);
 $("#share-selected-btn").addEventListener("click", shareSelected);
 $("#share-batch-access-mode").addEventListener("change", syncShareBatchModeUi);
 $("#share-batch-confirm").addEventListener("click", confirmShareSelected);
@@ -1564,7 +1626,7 @@ $("#summary-batch-keep").addEventListener("click", async () => {
   closeSummaryBatchDialog();
   if (!plan) return;
   await runBatchSummary({
-    tokens: plan.missing.map((item) => item.minute_token),
+    items: plan.missing,
     force: false,
   });
 });
@@ -1574,7 +1636,7 @@ $("#summary-batch-force").addEventListener("click", async () => {
   closeSummaryBatchDialog();
   if (!plan) return;
   await runBatchSummary({
-    tokens: [...plan.missing, ...plan.existing].map((item) => item.minute_token),
+    items: [...plan.missing, ...plan.existing],
     force: true,
   });
 });

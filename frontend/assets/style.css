@@ -866,7 +866,14 @@ body {
   margin-bottom: 0.25rem;
 }
 
-.btn-view {
+.meeting-row-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.4rem;
+}
+
+.btn-view,
+.btn-catchup {
   flex-shrink: 0;
 }
 

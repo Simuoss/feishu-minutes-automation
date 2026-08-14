@@ -16,14 +16,11 @@ from app.repository.uow import UnitOfWork
 from app.service.download_pool import download_pool
 from app.service.download_progress_store import download_progress_store
 from app.service.meeting_storage_service import MeetingStorageService
-from app.service.summary_generation_service import summary_generation_service
 from app.service.transcript_anchor import extract_unique_speakers
 
 logger = logging.getLogger(__name__)
 
 MANUAL_EVENT_TYPE = "MANUAL_DOWNLOAD"
-
-_auto_summary_tasks: set[asyncio.Task[object]] = set()
 
 
 @dataclass
@@ -53,18 +50,30 @@ class MeetingDownloadService:
         return self._minutes or FeishuMinutesClient(user_id=user_id)
 
     @staticmethod
-    def _spawn_auto_summary(minute_token: str, *, owner_user_id: int) -> None:
+    async def _enqueue_followups(minute_token: str, *, owner_user_id: int) -> None:
+        from app.service.pipeline_queue import (
+            JOB_SHARE_VIDEO,
+            JOB_SUMMARY,
+            enqueue_job,
+        )
+        from app.service.r2_media_service import r2_media_service
+
+        if r2_media_service.enabled():
+            await enqueue_job(
+                minute_token,
+                owner_user_id=owner_user_id,
+                job_type=JOB_SHARE_VIDEO,
+            )
         if not runtime_config.get_bool("SUMMARY_AUTO_GENERATE", True):
             return
-        task: asyncio.Task[object] = asyncio.create_task(
-            summary_generation_service.generate(
-                minute_token, owner_user_id=owner_user_id
-            )
+        await enqueue_job(
+            minute_token,
+            owner_user_id=owner_user_id,
+            job_type=JOB_SUMMARY,
+            mode="FULL",
         )
-        _auto_summary_tasks.add(task)
-        task.add_done_callback(_auto_summary_tasks.discard)
         logger.info(
-            "已为妙记排队自动生成纪要 owner=%s token=%s",
+            "已为妙记入队自动生成纪要 owner=%s token=%s",
             owner_user_id,
             minute_token,
         )
@@ -122,7 +131,9 @@ class MeetingDownloadService:
                 download_progress_store.complete(
                     minute_token, owner_user_id=owner_id
                 )
-                self._spawn_auto_summary(minute_token, owner_user_id=owner_id)
+                await self._enqueue_followups(
+                    minute_token, owner_user_id=owner_id
+                )
                 return DownloadResult(
                     minute_token=minute_token,
                     record_id=existing.id,
@@ -278,12 +289,9 @@ class MeetingDownloadService:
                     finished=True,
                 )
                 # 下载完成后即可压缩上云供播放；原片仍保留，待纪要完成后 finalize 再删
-                from app.service.r2_media_service import r2_media_service
-
-                r2_media_service.spawn_share_video(
+                await self._enqueue_followups(
                     minute_token, owner_user_id=owner_id
                 )
-                self._spawn_auto_summary(minute_token, owner_user_id=owner_id)
                 return DownloadResult(
                     minute_token=minute_token, record_id=record_id, status="COMPLETED"
                 )
@@ -409,7 +417,10 @@ class MeetingDownloadService:
             minute_token, owner_user_id=owner_id
         )
         existing_meta = (
-            self._storage.read_meta(minute_token, owner_user_id=owner_id) or {}
+            await self._storage.read_meta_async(
+                minute_token, owner_user_id=owner_id
+            )
+            or {}
         )
 
         media_path = existing_meta.get("files", {}).get("media")
@@ -444,6 +455,14 @@ class MeetingDownloadService:
                     minute_token, transcript_bytes, owner_user_id=owner_id
                 )
             )
+            from app.service.r2_media_service import r2_media_service
+
+            if r2_media_service.enabled():
+                await r2_media_service.sync_transcript_text_safe(
+                    minute_token,
+                    transcript_bytes,
+                    owner_user_id=owner_id,
+                )
             try:
                 speakers = extract_unique_speakers(
                     transcript_bytes.decode("utf-8", errors="replace")
@@ -457,7 +476,7 @@ class MeetingDownloadService:
                 )
         else:
             progress(percent=80, stage="保留已有转写")
-            existing_text = self._storage.read_transcript(
+            existing_text = await self._storage.read_transcript_async(
                 minute_token, owner_user_id=owner_id
             )
             if existing_text:
@@ -486,7 +505,9 @@ class MeetingDownloadService:
                 "output": str(layout["output"]),
             },
         }
-        self._storage.write_meta(minute_token, meta, owner_user_id=owner_id)
+        await self._storage.write_meta_async(
+            minute_token, meta, owner_user_id=owner_id
+        )
 
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
@@ -502,6 +523,7 @@ class MeetingDownloadService:
                     transcript_relpath=str(transcript_path) if transcript_path else None,
                     storage_root_relpath=storage_relpath(owner_id, minute_token),
                     speakers_json=json.dumps(speakers, ensure_ascii=False),
+                    create_time=minute_info.create_time or existing_meta.get("create_time"),
                 )
             )
             await uow.commit()

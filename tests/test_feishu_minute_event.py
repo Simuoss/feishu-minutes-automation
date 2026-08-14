@@ -258,11 +258,11 @@ def test_download_retries_when_minute_not_ready(monkeypatch: Any) -> None:
             )
 
     monkeypatch.setattr(service, "_download_and_store", flaky_store)
-    monkeypatch.setattr(
-        service,
-        "_spawn_auto_summary",
-        lambda _token, *, owner_user_id: None,
-    )
+
+    async def fake_enqueue(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_enqueue_followups", fake_enqueue)
     _patch_download_uow(monkeypatch, service)
 
     result = asyncio.run(

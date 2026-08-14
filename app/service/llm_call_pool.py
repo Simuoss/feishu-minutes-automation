@@ -11,12 +11,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar, Token
 
 from app.core import runtime_config
 
 logger = logging.getLogger(__name__)
+
+_wait_stage_hook: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "llm_wait_stage_hook", default=None
+)
+
+
+def set_wait_stage_hook(hook: Callable[[str], None]) -> Token[Callable[[str], None] | None]:
+    return _wait_stage_hook.set(hook)
+
+
+def reset_wait_stage_hook(token: Token[Callable[[str], None] | None]) -> None:
+    _wait_stage_hook.reset(token)
 
 
 class LlmCallPool:
@@ -88,6 +101,9 @@ class LlmCallPool:
         self._ensure_loop_state()
         assert self._semaphore is not None
         self._waiters += 1
+        hook = _wait_stage_hook.get()
+        if hook is not None and self._in_flight >= self._concurrency:
+            hook("在等模型槽位")
         try:
             await self._semaphore.acquire()
         finally:

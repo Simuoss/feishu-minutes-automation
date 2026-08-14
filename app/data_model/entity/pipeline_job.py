@@ -45,6 +45,7 @@ class PipelineJobUpdateEntity:
     attempt: int | None = None
     max_attempts: int | None = None
     error_message: str | None = None
+    started_at: int | None = None
     finished_at: int | None = None
     broker_updated_at: int | None = None
     mode: str | None = None

@@ -328,7 +328,7 @@ const SUMMARY_STAGES = [
   {
     id: "queue",
     title: "排队等待",
-    desc: "任务已提交，等待全局大模型空闲槽位",
+    desc: "任务已入队：可能在等同账号上一场纪要、模型槽位或分享片压缩",
   },
   {
     id: "parse",
@@ -363,7 +363,7 @@ function resolveSummaryStageId(data) {
   if (data.status === "QUEUED" || data.status === "PENDING") return "queue";
   const stage = String(data.stage || "");
   const percent = Number(data.percent) || 0;
-  if (/排队/.test(stage)) return "queue";
+  if (/排队|槽位|同账号|压缩分享/.test(stage)) return "queue";
   if (/解析转写/.test(stage) || (percent > 0 && percent < 6)) return "parse";
   if (/敏感|打码|脱敏|扫描 .* 张截图/.test(stage) || (percent >= 32 && percent < 40)) {
     return "redact";

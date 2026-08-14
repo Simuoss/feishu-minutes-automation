@@ -20,6 +20,13 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _normalize_create_time(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text[:64] if text else None
+
+
 def _parse_downloaded_at_ms(raw: Any) -> int | None:
     if raw is None:
         return None
@@ -91,6 +98,7 @@ async def upsert_meeting_meta(
             transcript_relpath=files.get("transcript") if isinstance(files, dict) else None,
             downloaded_at=_parse_downloaded_at_ms(meta.get("downloaded_at")),
             storage_root_relpath=rel,
+            create_time=_normalize_create_time(meta.get("create_time")),
         )
         if existing and existing.id is not None:
             from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
@@ -110,6 +118,7 @@ async def upsert_meeting_meta(
                     storage_root_relpath=entity.storage_root_relpath,
                     status=entity.status,
                     storage_path=entity.storage_path,
+                    create_time=entity.create_time,
                 )
             )
         else:
@@ -374,6 +383,7 @@ async def read_meeting_meta(
             "feishu_event_id": record.feishu_event_id,
             "unique_key": record.unique_key,
             "downloaded_at": _ms_to_iso(record.downloaded_at),
+            "create_time": record.create_time,
             "files": {
                 "media": record.media_relpath,
                 "transcript": record.transcript_relpath,

@@ -218,7 +218,9 @@ class MeetingListService:
             if not token:
                 continue
             create_time = None
-            if record.downloaded_at is not None:
+            if record.create_time and str(record.create_time).strip():
+                create_time = str(record.create_time).strip()
+            elif record.downloaded_at is not None:
                 create_time = datetime.fromtimestamp(
                     record.downloaded_at / 1000.0
                     if record.downloaded_at > 10_000_000_000

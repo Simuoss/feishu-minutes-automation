@@ -15,6 +15,41 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _s3_error_code(exc: BaseException) -> str:
+    response = getattr(exc, "response", None) or {}
+    if not isinstance(response, dict):
+        return ""
+    error = response.get("Error") or {}
+    if not isinstance(error, dict):
+        return ""
+    return str(error.get("Code") or "")
+
+
+def _is_access_denied(exc: BaseException) -> bool:
+    code = _s3_error_code(exc).lower()
+    if code in {"accessdenied", "unauthorizedaccess", "accessdeniedexception"}:
+        return True
+    text = str(exc).lower()
+    return "accessdenied" in text or "access denied" in text
+
+
+def cors_rules_cover_origins(rules: list[Any], origins: list[str]) -> bool:
+    """已有 CORS 规则是否已覆盖所需 Origin 的 GET/HEAD。"""
+    needed = {o.rstrip("/") for o in origins if o}
+    if not needed:
+        return True
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        allowed = {str(item).rstrip("/") for item in (rule.get("AllowedOrigins") or [])}
+        methods = {str(item).upper() for item in (rule.get("AllowedMethods") or [])}
+        if "GET" not in methods:
+            continue
+        if "*" in allowed or needed.issubset(allowed):
+            return True
+    return False
+
+
 class R2ClientError(RuntimeError):
     """R2 调用失败。"""
 
@@ -169,11 +204,10 @@ class R2Client:
         return url
 
     async def ensure_browser_cors(self, allowed_origins: list[str]) -> None:
-        """允许前端浏览器直连 fetch 签名 URL（GET/HEAD）。"""
+        """桶 CORS 已覆盖所需 Origin 则跳过；无写权限时假定控制台已手配，不报 ERROR。"""
         origins = [o.strip().rstrip("/") for o in allowed_origins if (o or "").strip()]
         if not origins:
             return
-        # 去重保序
         seen: set[str] = set()
         unique: list[str] = []
         for origin in origins:
@@ -181,26 +215,54 @@ class R2Client:
                 continue
             seen.add(origin)
             unique.append(origin)
-        rule = {
-            "AllowedOrigins": unique,
-            "AllowedMethods": ["GET", "HEAD"],
-            "AllowedHeaders": ["*"],
-            "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
-            "MaxAgeSeconds": 3600,
-        }
-        try:
-            async with self._client() as client:
+        bucket = settings.r2_bucket.strip()
+        async with self._client() as client:
+            try:
+                current = await client.get_bucket_cors(Bucket=bucket)
+                rules = list(current.get("CORSRules") or [])
+                if cors_rules_cover_origins(rules, unique):
+                    logger.info("R2 桶 CORS 已覆盖前端 Origin，跳过写入")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                if _is_access_denied(exc):
+                    logger.info(
+                        "当前 R2 Token 不能读写桶 CORS，沿用控制台手配规则"
+                    )
+                    return
+                if _s3_error_code(exc) not in {"NoSuchCORSConfiguration", "NoSuchBucket"}:
+                    logger.warning("读取 R2 CORS 失败，将尝试写入。err=%s", exc)
+            try:
                 await client.put_bucket_cors(
-                    Bucket=settings.r2_bucket.strip(),
-                    CORSConfiguration={"CORSRules": [rule]},
+                    Bucket=bucket,
+                    CORSConfiguration={
+                        "CORSRules": [
+                            {
+                                "AllowedOrigins": unique,
+                                "AllowedMethods": ["GET", "HEAD"],
+                                "AllowedHeaders": ["*"],
+                                "ExposeHeaders": [
+                                    "ETag",
+                                    "Content-Length",
+                                    "Content-Type",
+                                ],
+                                "MaxAgeSeconds": 3600,
+                            }
+                        ]
+                    },
                 )
-            logger.info("已配置 R2 浏览器 CORS origins=%s", unique)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "配置 R2 CORS 失败，前端直连正文可能被浏览器拦截。"
-                "请在 Cloudflare R2 桶上手动允许前端 Origin。err=%s",
-                exc,
-            )
+            except Exception as exc:  # noqa: BLE001
+                if _is_access_denied(exc):
+                    logger.info(
+                        "当前 R2 Token 无 PutBucketCors 权限，沿用控制台手配规则"
+                    )
+                    return
+                logger.error(
+                    "配置 R2 CORS 失败，前端直连正文可能被浏览器拦截。"
+                    "请在 Cloudflare R2 桶上手动允许前端 Origin。err=%s",
+                    exc,
+                )
+                return
+        logger.info("已配置 R2 浏览器 CORS origins=%s", unique)
 
 
 r2_client = R2Client()

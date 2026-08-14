@@ -43,7 +43,7 @@ class MeetingStorageService:
             path.mkdir(parents=True, exist_ok=True)
         return layout
 
-    def write_meta(
+    async def write_meta_async(
         self,
         minute_token: str,
         meta: dict[str, Any],
@@ -51,12 +51,11 @@ class MeetingStorageService:
         owner_user_id: int,
     ) -> Path:
         layout = self.ensure_layout(minute_token, owner_user_id=owner_user_id)
-        from app.core.async_bridge import run_async
         from app.service.metadata_db_service import upsert_meeting_meta
 
         try:
-            run_async(
-                upsert_meeting_meta(minute_token, meta, owner_user_id=owner_user_id)
+            await upsert_meeting_meta(
+                minute_token, meta, owner_user_id=owner_user_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -67,6 +66,21 @@ class MeetingStorageService:
             )
             raise
         return layout["base"]
+
+    def write_meta(
+        self,
+        minute_token: str,
+        meta: dict[str, Any],
+        *,
+        owner_user_id: int,
+    ) -> Path:
+        from app.core.async_bridge import run_async
+
+        return run_async(
+            self.write_meta_async(
+                minute_token, meta, owner_user_id=owner_user_id
+            )
+        )
 
     async def read_meta_async(
         self,
@@ -187,26 +201,6 @@ class MeetingStorageService:
             minute_token,
             transcript_path,
         )
-        from app.core.async_bridge import run_async
-        from app.service.r2_media_service import r2_media_service
-
-        if r2_media_service.enabled():
-            try:
-                run_async(
-                    r2_media_service.sync_transcript_text_safe(
-                        minute_token,
-                        content,
-                        owner_user_id=owner_user_id,
-                        filename_suffix=file_format,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "转写本地已落盘但触发 R2 双写失败 token=%s，"
-                    "公网读可能回落本地或变慢。err=%s",
-                    minute_token,
-                    exc,
-                )
         return transcript_path
 
     def _read_transcript_local(
@@ -431,7 +425,7 @@ class MeetingStorageService:
             minute_token, owner_user_id=owner_user_id
         ).is_file()
 
-    def save_summary(
+    async def save_summary_async(
         self,
         minute_token: str,
         content: str,
@@ -441,15 +435,12 @@ class MeetingStorageService:
     ) -> Path:
         layout = self.ensure_layout(minute_token, owner_user_id=owner_user_id)
         summary_path = layout["output"] / "summary.md"
-        summary_path.write_text(content, encoding="utf-8")
-        from app.core.async_bridge import run_async
+        await asyncio.to_thread(summary_path.write_text, content, "utf-8")
         from app.service.metadata_db_service import upsert_summary_meta
 
         try:
-            run_async(
-                upsert_summary_meta(
-                    minute_token, meta, owner_user_id=owner_user_id
-                )
+            await upsert_summary_meta(
+                minute_token, meta, owner_user_id=owner_user_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -469,12 +460,10 @@ class MeetingStorageService:
 
         if r2_media_service.enabled():
             try:
-                run_async(
-                    r2_media_service.sync_summary_text_safe(
-                        minute_token,
-                        content,
-                        owner_user_id=owner_user_id,
-                    )
+                await r2_media_service.sync_summary_text_safe(
+                    minute_token,
+                    content,
+                    owner_user_id=owner_user_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -484,6 +473,22 @@ class MeetingStorageService:
                     exc,
                 )
         return summary_path
+
+    def save_summary(
+        self,
+        minute_token: str,
+        content: str,
+        meta: dict[str, Any],
+        *,
+        owner_user_id: int,
+    ) -> Path:
+        from app.core.async_bridge import run_async
+
+        return run_async(
+            self.save_summary_async(
+                minute_token, content, meta, owner_user_id=owner_user_id
+            )
+        )
 
     async def read_summary_async(
         self, minute_token: str, *, owner_user_id: int

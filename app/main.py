@@ -1,5 +1,6 @@
 """飞书妙记自动化 - 后端 API 入口。"""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,6 +16,13 @@ from app.service.minute_subscription_service import ensure_minute_generated_subs
 from app.service.stale_job_recovery import recover_stale_inflight_jobs
 
 _ws_runner: FeishuWsClientRunner | None = None
+
+
+async def _run_create_time_backfill(backfill) -> None:
+    try:
+        await backfill()
+    except Exception:  # noqa: BLE001 — 回填失败不阻断服务
+        pass
 
 
 @asynccontextmanager
@@ -52,11 +60,22 @@ async def lifespan(_app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — CORS 失败不阻断启动
         pass
+    from app.core.loop_bridge import set_main_loop
+    from app.service.create_time_backfill import backfill_missing_create_times
+    from app.service.pipeline_worker import pipeline_worker
+
+    set_main_loop(asyncio.get_running_loop())
+    pipeline_worker.start()
+    asyncio.create_task(
+        _run_create_time_backfill(backfill_missing_create_times),
+        name="create-time-backfill",
+    )
     _ws_runner = FeishuWsClientRunner()
     _ws_runner.start()
     # 进程重启后补订阅：用户身份订阅不会随 WS 建连自动恢复
     await ensure_minute_generated_subscription()
     yield
+    await pipeline_worker.stop()
 
 
 app = FastAPI(

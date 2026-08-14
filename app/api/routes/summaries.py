@@ -4,7 +4,7 @@ import mimetypes
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from app.core.auth_context import require_user_id
@@ -44,14 +44,6 @@ router = APIRouter(prefix="/meetings", tags=["summaries"])
 _summary_service = summary_generation_service
 _storage = MeetingStorageService()
 _review = redaction_review_service
-
-
-async def _run_generation(
-    minute_token: str, force: bool, mode: str, owner_user_id: int
-) -> None:
-    await _summary_service.generate(
-        minute_token, owner_user_id=owner_user_id, force=force, mode=mode
-    )
 
 
 def _meta_to_dto(meta: dict[str, Any]) -> SummaryMetaData:
@@ -174,7 +166,6 @@ def _audit_to_response(minute_token: str, audit: dict[str, Any]) -> RedactionAud
 async def generate_summary(
     minute_token: str,
     body: GenerateSummaryRequest,
-    background_tasks: BackgroundTasks,
     request: Request,
     sync: bool = Query(default=False, description="为 true 时同步等待生成完成，耗时可达数分钟"),
     owner_user_id: int | None = None,
@@ -207,9 +198,17 @@ async def generate_summary(
             mode=result.mode,
         )
 
-    background_tasks.add_task(
-        _run_generation, minute_token, body.force, body.mode, owner
+    from app.service.pipeline_queue import JOB_SUMMARY, enqueue_job
+    from app.service.summary_event_broker import summary_broker as _broker
+
+    await enqueue_job(
+        minute_token,
+        owner_user_id=owner,
+        job_type=JOB_SUMMARY,
+        mode=body.mode,
+        force=body.force,
     )
+    _broker.bind(minute_token, owner_user_id=owner).queue(position=0)
     return GenerateSummaryResponse(
         minute_token=minute_token,
         status=SummaryStatus.QUEUED.value,
@@ -226,10 +225,12 @@ async def get_summary_progress(
     owner = await assert_meeting_progress_visible(
         request, minute_token, owner_user_id=owner_user_id
     )
-    channel = summary_broker.get(minute_token, owner_user_id=owner)
-    if channel is None:
+    from app.service.pipeline_queue import resolve_progress
+
+    snap = await resolve_progress(minute_token, owner_user_id=owner)
+    if snap is None:
         raise HTTPException(status_code=404, detail="暂无该会议的纪要生成进度")
-    return SummaryProgressResponse(**channel.snapshot())
+    return SummaryProgressResponse(**snap)
 
 
 @router.post("/summary/progress/batch", response_model=SummaryProgressBatchResponse)
@@ -248,10 +249,12 @@ async def get_summary_progress_batch(
             )
         except HTTPException:
             continue
-        channel = summary_broker.get(token, owner_user_id=owner)
-        if channel is None:
+        from app.service.pipeline_queue import resolve_progress
+
+        snap = await resolve_progress(token, owner_user_id=owner)
+        if snap is None:
             continue
-        items.append(SummaryProgressResponse(**channel.snapshot()))
+        items.append(SummaryProgressResponse(**snap))
     return SummaryProgressBatchResponse(items=items)
 
 

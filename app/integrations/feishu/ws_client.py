@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import threading
@@ -30,15 +29,13 @@ def _event_to_payload(data: Any) -> dict[str, Any]:
 
 
 def _schedule_handle(payload: dict[str, Any]) -> None:
-    """在独立线程中异步处理事件，满足长连接 3 秒内响应要求。"""
+    """立刻回 ACK，把下载投递到 FastAPI 主循环，避免独立 loop 被关掉后丢掉后续作业。"""
+    from app.core.loop_bridge import schedule_on_main_loop
 
-    def _run() -> None:
-        try:
-            asyncio.run(_event_service.handle_event(payload))
-        except Exception:
-            logger.exception("后台处理飞书事件失败，怀疑下载链路或权限配置异常")
-
-    threading.Thread(target=_run, daemon=True, name="feishu-event-worker").start()
+    schedule_on_main_loop(
+        _event_service.handle_event(payload),
+        what="feishu-minute-generated",
+    )
 
 
 def _handle_minute_generated(data: P2MinutesMinuteGeneratedV1) -> None:

@@ -94,6 +94,7 @@ class SummaryGenerationService:
         owner_user_id: int,
         force: bool = False,
         mode: str = "FULL",
+        pipeline_job_id: int | None = None,
     ) -> SummaryResult:
         broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
         run_mode = (mode or "FULL").strip().upper()
@@ -124,8 +125,10 @@ class SummaryGenerationService:
             )
 
         # FULL/WRITE 在无 force 且已有纪要时跳过；REDACT 允许在已有纪要上重跑脱敏
+        # 注意：此处必须用 async 读接口。同步 read_* 会经 run_async 堵死事件循环，
+        # 与同进程 ffmpeg 子进程管道互相等待，表现为「已排队却永不开始生成」。
         if run_mode in {"FULL", "WRITE"} and not force:
-            existing = self._storage.read_summary(
+            existing = await self._storage.read_summary_async(
                 minute_token, owner_user_id=owner_user_id
             )
             if existing is not None:
@@ -138,7 +141,7 @@ class SummaryGenerationService:
                     mode=run_mode,
                 )
 
-        transcript = self._storage.read_transcript(
+        transcript = await self._storage.read_transcript_async(
             minute_token, owner_user_id=owner_user_id
         )
         if not transcript or not transcript.strip():
@@ -155,16 +158,23 @@ class SummaryGenerationService:
                 mode=run_mode,
             )
 
-        return await self._pool.submit(
-            minute_token,
-            lambda: self._generate_in_pool(
+        from app.service.owner_summary_gate import owner_summary_gate
+
+        async with owner_summary_gate.hold(
+            owner_user_id,
+            on_wait=lambda stage: broker.update(percent=8, stage=stage),
+        ):
+            return await self._pool.submit(
                 minute_token,
-                transcript,
-                run_mode,
+                lambda: self._generate_in_pool(
+                    minute_token,
+                    transcript,
+                    run_mode,
+                    owner_user_id=owner_user_id,
+                    pipeline_job_id=pipeline_job_id,
+                ),
                 owner_user_id=owner_user_id,
-            ),
-            owner_user_id=owner_user_id,
-        )
+            )
 
     async def _run_r2_sync(
         self, minute_token: str, *, owner_user_id: int
@@ -185,7 +195,7 @@ class SummaryGenerationService:
                 error_message=message,
                 mode="R2_SYNC",
             )
-        existing = self._storage.read_summary(
+        existing = await self._storage.read_summary_async(
             minute_token, owner_user_id=owner_user_id
         )
         content = (existing or {}).get("content") or ""
@@ -193,7 +203,7 @@ class SummaryGenerationService:
         meta["r2_synced_at"] = datetime.now(timezone.utc).isoformat()
         meta["r2_uploaded"] = uploaded
         if existing is not None:
-            self._storage.save_summary(
+            await self._storage.save_summary_async(
                 minute_token, content, meta, owner_user_id=owner_user_id
             )
         broker.complete(content, meta)
@@ -205,19 +215,18 @@ class SummaryGenerationService:
             mode="R2_SYNC",
         )
 
-    def _load_prepared_figures(
+    async def _load_prepared_figures(
         self, minute_token: str, *, owner_user_id: int
     ) -> list[PreparedFigure]:
         """从 DB 清单 + assets 重建配图；无清单时回退扫描 assets 目录。"""
         assets = self._storage.get_assets_dir(
             minute_token, owner_user_id=owner_user_id
         )
-        from app.core.async_bridge import run_async
         from app.service.metadata_db_service import read_figures_manifest
 
         try:
-            manifest = run_async(
-                read_figures_manifest(minute_token, owner_user_id=owner_user_id)
+            manifest = await read_figures_manifest(
+                minute_token, owner_user_id=owner_user_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -248,20 +257,17 @@ class SummaryGenerationService:
             )
         return figures
 
-    def _persist_manifest(
+    async def _persist_manifest(
         self, minute_token: str, figures: list[PreparedFigure], *, owner_user_id: int
     ) -> None:
         payload = figures_to_manifest(figures)
-        from app.core.async_bridge import run_async
         from app.service.metadata_db_service import replace_figures_from_manifest
 
-        run_async(
-            replace_figures_from_manifest(
-                minute_token, payload, owner_user_id=owner_user_id
-            )
+        await replace_figures_from_manifest(
+            minute_token, payload, owner_user_id=owner_user_id
         )
 
-    def _persist_redaction_audit(
+    async def _persist_redaction_audit(
         self,
         minute_token: str,
         outcome: RedactionOutcome,
@@ -275,13 +281,10 @@ class SummaryGenerationService:
             redacted=outcome.redacted,
             abandoned=outcome.abandoned,
         )
-        from app.core.async_bridge import run_async
         from app.service.metadata_db_service import replace_redaction_from_audit
 
-        run_async(
-            replace_redaction_from_audit(
-                minute_token, payload, owner_user_id=owner_user_id
-            )
+        await replace_redaction_from_audit(
+            minute_token, payload, owner_user_id=owner_user_id
         )
     async def _run_redaction(
         self,
@@ -332,7 +335,7 @@ class SummaryGenerationService:
             )
             for fig in figures:
                 fig.path.unlink(missing_ok=True)
-            self._persist_redaction_audit(
+            await self._persist_redaction_audit(
                 minute_token,
                 RedactionOutcome(
                     figures=[],
@@ -355,7 +358,7 @@ class SummaryGenerationService:
                 "figure_abandoned": len(figures),
             }
 
-        self._persist_redaction_audit(
+        await self._persist_redaction_audit(
             minute_token, outcome, owner_user_id=owner_user_id
         )
         shutil.rmtree(
@@ -486,7 +489,7 @@ class SummaryGenerationService:
             limit=figure_limit,
         )
         if figures:
-            self._persist_manifest(
+            await self._persist_manifest(
                 minute_token, figures, owner_user_id=owner_user_id
             )
         return figures
@@ -568,7 +571,7 @@ class SummaryGenerationService:
             broker.update(percent=93, stage="清理未采用的截图")
             used_figures = self._illustration.drop_unreferenced(alignment.text, figures)
             # 成文后清单只保留实际用上的图，便于 WRITE 重跑
-            self._persist_manifest(
+            await self._persist_manifest(
                 minute_token, used_figures, owner_user_id=owner_user_id
             )
 
@@ -596,7 +599,7 @@ class SummaryGenerationService:
         }
         # 合并已有脱敏统计（WRITE 模式未重跑脱敏时保留上次）
         if mode == "WRITE":
-            previous = self._storage.read_summary(
+            previous = await self._storage.read_summary_async(
                 minute_token, owner_user_id=owner_user_id
             )
             prev_meta = (previous or {}).get("meta") or {}
@@ -609,7 +612,7 @@ class SummaryGenerationService:
                 if meta.get(key, 0) == 0 and prev_meta.get(key) is not None:
                     meta[key] = prev_meta.get(key)
 
-        self._storage.save_summary(
+        await self._storage.save_summary_async(
             minute_token, alignment.text, meta, owner_user_id=owner_user_id
         )
         await r2_media_service.sync_assets_safe(
@@ -651,16 +654,23 @@ class SummaryGenerationService:
         mode: str = "FULL",
         *,
         owner_user_id: int,
+        pipeline_job_id: int | None = None,
     ) -> SummaryResult:
         broker = summary_broker.bind(minute_token, owner_user_id=owner_user_id)
+        from app.service.llm_call_pool import reset_wait_stage_hook, set_wait_stage_hook
         from app.service.pipeline_job_service import start_job, update_job
 
-        job_id = await start_job(
-            minute_token,
-            job_type="SUMMARY",
-            mode=mode,
-            stage="START",
-            owner_user_id=owner_user_id,
+        job_id = pipeline_job_id
+        if job_id is None:
+            job_id = await start_job(
+                minute_token,
+                job_type="SUMMARY",
+                mode=mode,
+                stage="START",
+                owner_user_id=owner_user_id,
+            )
+        hook_token = set_wait_stage_hook(
+            lambda stage: broker.update(percent=max(8, 8), stage=stage)
         )
         try:
             broker.update(percent=5, stage="解析转写文本")
@@ -730,7 +740,7 @@ class SummaryGenerationService:
                 return result
 
             if mode == "REDACT":
-                figures = self._load_prepared_figures(
+                figures = await self._load_prepared_figures(
                     minute_token, owner_user_id=owner_user_id
                 )
                 if not figures:
@@ -764,11 +774,11 @@ class SummaryGenerationService:
                 figures, redaction_meta = await self._run_redaction(
                     minute_token, restored, owner_user_id=owner_user_id
                 )
-                self._persist_manifest(
+                await self._persist_manifest(
                     minute_token, figures, owner_user_id=owner_user_id
                 )
                 # 更新 meta 中的脱敏统计，保留正文
-                existing = self._storage.read_summary(
+                existing = await self._storage.read_summary_async(
                     minute_token, owner_user_id=owner_user_id
                 )
                 content = (existing or {}).get("content") or ""
@@ -777,7 +787,7 @@ class SummaryGenerationService:
                 meta["redacted_at"] = datetime.now(timezone.utc).isoformat()
                 meta["run_mode"] = mode
                 if existing is not None:
-                    self._storage.save_summary(
+                    await self._storage.save_summary_async(
                         minute_token, content, meta, owner_user_id=owner_user_id
                     )
                 broker.complete(content, meta)
@@ -801,7 +811,7 @@ class SummaryGenerationService:
                 )
 
             # WRITE：跳过抽帧与脱敏，直接成文
-            figures = self._load_prepared_figures(
+            figures = await self._load_prepared_figures(
                 minute_token, owner_user_id=owner_user_id
             )
             figure_prepared = len(figures)
@@ -836,6 +846,8 @@ class SummaryGenerationService:
                 finished=True,
             )
             raise
+        finally:
+            reset_wait_stage_hook(hook_token)
 
 
 summary_generation_service = SummaryGenerationService()

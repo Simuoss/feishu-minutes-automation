@@ -33,6 +33,7 @@ def _to_entity(orm: MeetingRecordORM) -> MeetingRecordEntity:
         downloaded_at=orm.downloaded_at,
         storage_root_relpath=orm.storage_root_relpath,
         speakers_json=orm.speakers_json,
+        create_time=orm.create_time,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
     )
@@ -62,6 +63,7 @@ class MeetingRecordRepository:
             downloaded_at=entity.downloaded_at,
             storage_root_relpath=entity.storage_root_relpath,
             speakers_json=entity.speakers_json,
+            create_time=entity.create_time,
         )
         self._session.add(orm)
         await self._session.flush()
@@ -91,6 +93,7 @@ class MeetingRecordRepository:
             "speakers_json",
             "event_type",
             "feishu_event_id",
+            "create_time",
         ):
             value = getattr(entity, field)
             if value is not None:
@@ -154,6 +157,7 @@ class MeetingRecordRepository:
                 storage_root_relpath=entity.storage_root_relpath,
                 unique_key=entity.unique_key,
                 speakers_json=entity.speakers_json,
+                create_time=entity.create_time,
             )
         )
         return updated or existing

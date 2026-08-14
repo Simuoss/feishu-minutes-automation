@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from app.integrations.llm.messages_client import LlmCompletion, LlmRequestError
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.summary_event_broker import SummaryStatus, summary_broker
@@ -12,6 +14,14 @@ from app.service.summary_generation_service import SummaryGenerationService
 
 TOKEN = "obtest0001"
 OWNER = 1
+
+
+@pytest.fixture(autouse=True)
+def _disable_r2_for_unit_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.service.r2_media_service.R2MediaService.enabled",
+        lambda self: False,
+    )
 
 TRANSCRIPT = """2026-07-21 20:58:04 CST|1小时 3秒
 
