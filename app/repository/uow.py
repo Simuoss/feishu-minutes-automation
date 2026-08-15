@@ -18,6 +18,7 @@ from app.repository.share_repository import ShareRepository
 from app.repository.summary_run_repository import SummaryRunRepository
 from app.repository.system_config_repository import SystemConfigRepository
 from app.repository.user_repository import UserRepository
+from app.repository.voiceprint_repository import VoiceprintRepository
 
 
 class UnitOfWork:
@@ -37,6 +38,7 @@ class UnitOfWork:
         self.pipeline_jobs: PipelineJobRepository | None = None
         self.r2_sync_states: R2SyncStateRepository | None = None
         self.system_configs: SystemConfigRepository | None = None
+        self.voiceprints: VoiceprintRepository | None = None
 
     async def __aenter__(self) -> Self:
         self._session = async_session_factory()
@@ -54,6 +56,7 @@ class UnitOfWork:
         self.pipeline_jobs = PipelineJobRepository(self._session)
         self.r2_sync_states = R2SyncStateRepository(self._session)
         self.system_configs = SystemConfigRepository(self._session)
+        self.voiceprints = VoiceprintRepository(self._session)
         return self
 
     async def __aexit__(

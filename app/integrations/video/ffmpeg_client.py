@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # 单帧抽取正常在 1 秒内完成，留足余量以防机械盘或超长文件
 FRAME_TIMEOUT_SECONDS = 60.0
 PROBE_TIMEOUT_SECONDS = 30.0
+# 抽音轨要走完整个文件，几小时的录像也得留够时间
+AUDIO_EXTRACT_TIMEOUT_SECONDS = 1800.0
 
 
 class FfmpegError(RuntimeError):
@@ -183,6 +185,108 @@ class FfmpegClient:
             logger.warning(
                 "抽帧未产出图片 t=%.1fs code=%s，怀疑该时间点越界或所在片段无法解码: %s",
                 seconds,
+                code,
+                stderr.decode("utf-8", errors="replace")[:200],
+            )
+            dest.unlink(missing_ok=True)
+            return None
+        return dest
+
+    async def extract_audio(
+        self,
+        media_path: Path,
+        dest: Path,
+        *,
+        sample_rate: int = 16000,
+        bitrate: str = "32k",
+        start_seconds: float | None = None,
+        duration_seconds: float | None = None,
+        timeout: float | None = None,
+    ) -> Path:
+        """抽出单声道音轨供语音识别使用，可只取其中一段。
+
+        统一转 16k 单声道：识别侧本来就按这个采样率建模，而且一小时只有十几兆，
+        远低于文件识别接口 100MB 的上限。
+        """
+        if not media_path.is_file():
+            raise FfmpegError(f"待抽取音轨的媒体文件不存在: {media_path}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self._ffmpeg, "-y", "-nostdin", "-loglevel", "error"]
+        if start_seconds is not None:
+            cmd += ["-ss", format_timestamp(start_seconds)]
+        if duration_seconds is not None:
+            cmd += ["-t", f"{max(0.1, duration_seconds):.3f}"]
+        cmd += [
+            "-i",
+            str(media_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-b:a",
+            bitrate,
+            str(dest),
+        ]
+        try:
+            code, _stdout, stderr = await _run(
+                cmd, timeout or AUDIO_EXTRACT_TIMEOUT_SECONDS
+            )
+        except FileNotFoundError as exc:
+            raise FfmpegError(
+                f"找不到 ffmpeg 可执行文件（当前配置 FFMPEG_PATH={self._ffmpeg}），无法抽取音轨"
+            ) from exc
+        if code != 0 or not dest.is_file() or dest.stat().st_size == 0:
+            dest.unlink(missing_ok=True)
+            raise FfmpegError(
+                "抽取音轨失败 code="
+                f"{code}，怀疑源文件没有音轨或已损坏: "
+                f"{stderr.decode('utf-8', errors='replace')[:200]}"
+            )
+        return dest
+
+    async def extract_audio_clip(
+        self,
+        media_path: Path,
+        start_seconds: float,
+        duration_seconds: float,
+        dest: Path,
+        *,
+        sample_rate: int = 16000,
+    ) -> Path | None:
+        """切一段 16k 单声道 wav 供声纹使用；越界或无法解码时返回 None。"""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            self._ffmpeg,
+            "-y",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-ss",
+            format_timestamp(start_seconds),
+            "-t",
+            f"{max(0.1, duration_seconds):.3f}",
+            "-i",
+            str(media_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "wav",
+            str(dest),
+        ]
+        try:
+            code, _stdout, stderr = await _run(cmd, FRAME_TIMEOUT_SECONDS)
+        except FileNotFoundError as exc:
+            raise FfmpegError(
+                f"找不到 ffmpeg 可执行文件（当前配置 FFMPEG_PATH={self._ffmpeg}），无法切分音频"
+            ) from exc
+        if code != 0 or not dest.is_file() or dest.stat().st_size == 0:
+            logger.warning(
+                "音频切片未产出 t=%.1fs code=%s，怀疑越界或该片段无法解码: %s",
+                start_seconds,
                 code,
                 stderr.decode("utf-8", errors="replace")[:200],
             )

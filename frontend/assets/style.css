@@ -2289,3 +2289,193 @@ body {
   margin: 0;
   font-size: 0.75rem;
 }
+
+
+/* —— 声纹人物（超管） —— */
+.voiceprint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.voiceprint-card {
+  border: 1px solid var(--border);
+  padding: 0.85rem 0.95rem;
+  background: var(--bg);
+}
+
+.voiceprint-card .btn-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.voiceprint-card .btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+.voiceprint-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.voiceprint-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.voiceprint-name-input {
+  min-width: 14rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  font-size: 0.95rem;
+}
+
+.voiceprint-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.voiceprint-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.voiceprint-col h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.voiceprint-samples,
+.voiceprint-meetings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.voiceprint-sample {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.voiceprint-sample audio {
+  height: 2rem;
+  max-width: 16rem;
+}
+
+.voiceprint-sample-range {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.voiceprint-sample-missing {
+  color: var(--muted);
+}
+
+.voiceprint-meeting-meta {
+  color: var(--muted);
+  margin-left: 0.4rem;
+}
+
+.voiceprint-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+}
+
+.voiceprint-merge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.voiceprint-merge select {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .voiceprint-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.speaker-panel {
+  border: 1px solid var(--border);
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  background: var(--hover);
+}
+
+.speaker-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.speaker-panel-head h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.speaker-panel-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.speaker-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.speaker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.speaker-label {
+  min-width: 4.5rem;
+}
+
+.speaker-talk {
+  color: var(--muted);
+  min-width: 5rem;
+}
+
+.speaker-name-input {
+  flex: 1 1 8rem;
+  max-width: 16rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+}
+
+.speaker-panel-status {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-height: 1rem;
+}

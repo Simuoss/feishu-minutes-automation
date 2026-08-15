@@ -33,6 +33,8 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("storage_root_relpath", "VARCHAR(512)"),
         ("speakers_json", "TEXT"),
         ("create_time", "VARCHAR(64)"),
+        ("transcript_source", "VARCHAR(16)"),
+        ("transcript_coverage", "FLOAT"),
     ],
     "shares": [
         ("owner_user_id", "INTEGER"),
@@ -265,6 +267,7 @@ async def init_db() -> None:
         summary_run,
         system_config,
         user,
+        voiceprint,
     )
 
     async with engine.begin() as conn:

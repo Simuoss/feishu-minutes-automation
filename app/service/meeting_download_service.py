@@ -57,6 +57,10 @@ class MeetingDownloadService:
             enqueue_job,
         )
         from app.service.r2_media_service import r2_media_service
+        from app.service.transcription_flow import (
+            enqueue_transcribe,
+            evaluate_transcript_coverage,
+        )
 
         if r2_media_service.enabled():
             await enqueue_job(
@@ -64,6 +68,20 @@ class MeetingDownloadService:
                 owner_user_id=owner_user_id,
                 job_type=JOB_SHARE_VIDEO,
             )
+
+        _coverage, needs_asr = await evaluate_transcript_coverage(
+            minute_token, owner_user_id=owner_user_id
+        )
+        if needs_asr:
+            # 纪要要读完整转写，所以这里只排转写；转写作业跑完自己会放纪要进队
+            await enqueue_transcribe(minute_token, owner_user_id=owner_user_id)
+            logger.info(
+                "转写不完整，已改走自建转写 owner=%s token=%s",
+                owner_user_id,
+                minute_token,
+            )
+            return
+
         if not runtime_config.get_bool("SUMMARY_AUTO_GENERATE", True):
             return
         await enqueue_job(

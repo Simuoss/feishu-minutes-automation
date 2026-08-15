@@ -4,6 +4,7 @@ from app.api.routes import (
     access_keys,
     admin_system_configs,
     admin_users,
+    admin_voiceprints,
     auth,
     auth_admin,
     exports,
@@ -21,6 +22,7 @@ api_router.include_router(feishu.router, tags=["feishu"])
 api_router.include_router(access_keys.router)
 api_router.include_router(admin_users.router)
 api_router.include_router(admin_system_configs.router)
+api_router.include_router(admin_voiceprints.router)
 api_router.include_router(shares.guest_router)
 # meetings 在前：/meetings/local/{token} 需先于 /meetings/{token}/summary 参与匹配
 api_router.include_router(meetings.router)

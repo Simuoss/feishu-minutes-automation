@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>声纹人物 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260815-voiceprints" />
+</head>
+<body class="admin-body" data-admin-page="voiceprints">
+  <div id="app" class="admin-shell">
+    <aside id="admin-sidebar" class="admin-sidebar" aria-label="管理导航"></aside>
+    <div class="admin-main">
+      <header class="header admin-header">
+        <div class="header-main">
+          <div>
+            <h1>声纹人物</h1>
+            <p class="subtitle">超级管理端 · 自建转写认出的说话人，命名后全站转写立刻显示真名</p>
+          </div>
+          <button id="refresh-voiceprints-btn" class="btn btn-sm" type="button">
+            <i class="ri ri-refresh-line" aria-hidden="true"></i><span class="btn-label">刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="view">
+        <section class="panel">
+          <p class="modal-hint">
+            这里的人物库是全站共享的。命名只影响转写与参会人的显示，
+            已经生成的纪要正文里的称呼是模型当时写下的，需要重跑纪要才会更新。
+          </p>
+          <div id="voiceprints-status" class="status"></div>
+          <div id="voiceprints-list" class="voiceprint-list"></div>
+          <p id="voiceprints-empty" class="empty hidden">还没有声纹人物；有会议走过自建转写后会自动出现。</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260806-feishu-sso"></script>
+  <script defer src="/assets/admin-shell.js?v=20260815-voiceprints"></script>
+  <script defer src="/assets/voiceprints.js?v=20260815-voiceprints"></script>
+</body>
+</html>

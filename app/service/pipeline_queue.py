@@ -1,4 +1,4 @@
-"""流水线作业入队 / 认领。SUMMARY 与 SHARE_VIDEO 经此落库，由 worker 消费。"""
+"""流水线作业入队 / 认领。SUMMARY、SHARE_VIDEO 与 TRANSCRIBE 经此落库，由 worker 消费。"""
 
 from __future__ import annotations
 
@@ -18,13 +18,20 @@ logger = logging.getLogger(__name__)
 
 JOB_SUMMARY = "SUMMARY"
 JOB_SHARE_VIDEO = "SHARE_VIDEO"
+JOB_TRANSCRIBE = "TRANSCRIBE"
 STATUS_QUEUED = "QUEUED"
 STATUS_RUNNING = "RUNNING"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_FAILED = "FAILED"
 
+WORKER_JOB_TYPES = [JOB_SUMMARY, JOB_SHARE_VIDEO, JOB_TRANSCRIBE]
+
 DEFAULT_MAX_ATTEMPTS = 3
 MAX_RUNNING_SHARE_VIDEO = 1
+# 转写要抽音轨、切片、跑 onnx，都吃 CPU，同时只跑一个
+MAX_RUNNING_TRANSCRIBE = 1
+# 一场几小时的录音分段送识别，留足余量
+TRANSCRIBE_STALE_MS = int(3 * 3600 * 1000)
 
 _wakeup = asyncio.Event()
 
@@ -68,9 +75,11 @@ def pick_claimable(
     running: list[PipelineJobEntity],
     *,
     max_share_video: int = MAX_RUNNING_SHARE_VIDEO,
+    max_transcribe: int = MAX_RUNNING_TRANSCRIBE,
 ) -> PipelineJobEntity | None:
     """纯函数：在已查出的队列里挑下一个可跑的作业。"""
     share_running = sum(1 for j in running if j.job_type == JOB_SHARE_VIDEO)
+    transcribe_running = sum(1 for j in running if j.job_type == JOB_TRANSCRIBE)
     busy_summary_owners = {
         j.owner_user_id for j in running if j.job_type == JOB_SUMMARY
     }
@@ -78,6 +87,8 @@ def pick_claimable(
         if job.job_type == JOB_SUMMARY and job.owner_user_id in busy_summary_owners:
             continue
         if job.job_type == JOB_SHARE_VIDEO and share_running >= max_share_video:
+            continue
+        if job.job_type == JOB_TRANSCRIBE and transcribe_running >= max_transcribe:
             continue
         return job
     return None
@@ -151,11 +162,11 @@ async def claim_next_job() -> PipelineJobEntity | None:
         assert uow.pipeline_jobs is not None
         queued = await uow.pipeline_jobs.list_by_statuses(
             [STATUS_QUEUED],
-            job_types=[JOB_SUMMARY, JOB_SHARE_VIDEO],
+            job_types=WORKER_JOB_TYPES,
         )
         running = await uow.pipeline_jobs.list_by_statuses(
             [STATUS_RUNNING],
-            job_types=[JOB_SUMMARY, JOB_SHARE_VIDEO],
+            job_types=WORKER_JOB_TYPES,
         )
         candidate = pick_claimable(queued, running)
         if candidate is None or candidate.id is None:
@@ -175,7 +186,7 @@ async def claim_next_job() -> PipelineJobEntity | None:
 
 
 async def requeue_orphaned_running(*, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> int:
-    """进程重启后：进行中的 SUMMARY/SHARE_VIDEO 无人收尾，退回队列或标失败。"""
+    """进程重启后：进行中的作业无人收尾，退回队列或标失败。"""
     now = _now_ms()
     requeued = 0
     failed = 0
@@ -184,7 +195,7 @@ async def requeue_orphaned_running(*, max_attempts: int = DEFAULT_MAX_ATTEMPTS) 
         assert uow.pipeline_jobs is not None
         running = await uow.pipeline_jobs.list_by_statuses(
             [STATUS_RUNNING],
-            job_types=[JOB_SUMMARY, JOB_SHARE_VIDEO],
+            job_types=WORKER_JOB_TYPES,
         )
         for job in running:
             if job.id is None:
@@ -229,11 +240,7 @@ async def requeue_orphaned_running(*, max_attempts: int = DEFAULT_MAX_ATTEMPTS) 
     for token, owner, status in summary_updates:
         await set_summary_status(token, status, owner_user_id=owner)
     if requeued or failed:
-        logger.warning(
-            "启动回收作业：重入队 %d，放弃 %d（SUMMARY/SHARE_VIDEO）",
-            requeued,
-            failed,
-        )
+        logger.warning("启动回收作业：重入队 %d，放弃 %d", requeued, failed)
     notify_worker()
     return requeued + failed
 
@@ -242,6 +249,7 @@ async def fail_stale_running(
     *,
     summary_timeout_ms: int,
     share_video_timeout_ms: int,
+    transcribe_timeout_ms: int = TRANSCRIBE_STALE_MS,
 ) -> int:
     now = _now_ms()
     marked = 0
@@ -250,17 +258,16 @@ async def fail_stale_running(
         assert uow.pipeline_jobs is not None
         running = await uow.pipeline_jobs.list_by_statuses(
             [STATUS_RUNNING],
-            job_types=[JOB_SUMMARY, JOB_SHARE_VIDEO],
+            job_types=WORKER_JOB_TYPES,
         )
         for job in running:
             if job.id is None:
                 continue
             heartbeat = job.broker_updated_at or job.started_at or 0
-            limit = (
-                share_video_timeout_ms
-                if job.job_type == JOB_SHARE_VIDEO
-                else summary_timeout_ms
-            )
+            limit = {
+                JOB_SHARE_VIDEO: share_video_timeout_ms,
+                JOB_TRANSCRIBE: transcribe_timeout_ms,
+            }.get(job.job_type, summary_timeout_ms)
             if now - int(heartbeat) < limit:
                 continue
             await uow.pipeline_jobs.update(
@@ -335,6 +342,7 @@ async def resolve_progress(
     jobs = await latest_jobs(minute_token, owner_user_id=owner_user_id)
     summary_job = jobs.get(JOB_SUMMARY)
     video_job = jobs.get(JOB_SHARE_VIDEO)
+    transcribe_job = jobs.get(JOB_TRANSCRIBE)
     video_running = bool(
         video_job and video_job.status in {STATUS_QUEUED, STATUS_RUNNING}
     )
@@ -344,6 +352,15 @@ async def resolve_progress(
             video_stage = "分享片压缩排队中"
         else:
             video_stage = video_job.stage or "压缩分享片中"
+
+    # 转写在纪要之前跑，进行中时它才是用户真正在等的那一步
+    if transcribe_job and transcribe_job.status in {STATUS_QUEUED, STATUS_RUNNING}:
+        stage = (
+            "自建转写排队中"
+            if transcribe_job.status == STATUS_QUEUED
+            else f"自建转写 · {transcribe_job.stage or '处理中'}"
+        )
+        return job_to_progress(transcribe_job, extra_stage=stage)
 
     if channel is not None:
         snap = channel.snapshot()
@@ -361,6 +378,12 @@ async def resolve_progress(
         return job_to_progress(summary_job, extra_stage=extra)
     if video_job and video_running:
         return job_to_progress(video_job, extra_stage=video_stage)
+    # 转写失败时不会再入队纪要，这里兜住否则详情页只看到「暂无进度」
+    if transcribe_job and transcribe_job.status == STATUS_FAILED:
+        return job_to_progress(
+            transcribe_job,
+            extra_stage=f"自建转写失败 · {transcribe_job.stage or '未知阶段'}",
+        )
     return None
 
 
@@ -375,4 +398,11 @@ async def latest_jobs(
         video = await uow.pipeline_jobs.get_latest(
             minute_token, JOB_SHARE_VIDEO, owner_user_id=owner_user_id
         )
-    return {JOB_SUMMARY: summary, JOB_SHARE_VIDEO: video}
+        transcribe = await uow.pipeline_jobs.get_latest(
+            minute_token, JOB_TRANSCRIBE, owner_user_id=owner_user_id
+        )
+    return {
+        JOB_SUMMARY: summary,
+        JOB_SHARE_VIDEO: video,
+        JOB_TRANSCRIBE: transcribe,
+    }

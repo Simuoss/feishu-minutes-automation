@@ -185,6 +185,16 @@ class R2Client:
             )
             return False
 
+    async def delete_object(self, key: str) -> bool:
+        try:
+            async with self._client() as client:
+                await client.delete_object(Bucket=settings.r2_bucket.strip(), Key=key)
+        except Exception as exc:  # noqa: BLE001 — 删不掉只是留了个孤儿对象，不该影响主流程
+            logger.warning("删除 R2 对象失败 key=%s: %s", key, exc)
+            return False
+        logger.info("已删除 R2 对象 key=%s", key)
+        return True
+
     async def presign_get(self, key: str, *, expires_in: int | None = None) -> str:
         from app.core import runtime_config
 

@@ -26,6 +26,12 @@ function mountAdminSidebar() {
       label: "管理员列表",
     });
     navItems.push({
+      id: "voiceprints",
+      href: "/voiceprints.html",
+      icon: "ri-user-voice-line",
+      label: "声纹人物",
+    });
+    navItems.push({
       id: "system-configs",
       href: "/system-configs.html",
       icon: "ri-settings-3-line",

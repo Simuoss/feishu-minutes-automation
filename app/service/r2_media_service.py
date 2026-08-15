@@ -18,6 +18,10 @@ from app.service.time_utils import utc_now_ms
 
 logger = logging.getLogger(__name__)
 
+# meta.text 里自建转写的槽位；与飞书原文的 transcript 槽位并存
+TRANSCRIPT_SLOT_ASR = "transcript_asr"
+TRANSCRIPT_SUFFIX_ASR = "asr.txt"
+
 VIDEO_STATUS_PENDING = "PENDING"
 VIDEO_STATUS_READY = "READY"
 VIDEO_STATUS_FAILED = "FAILED"
@@ -43,6 +47,58 @@ class R2MediaService:
 
     def summary_key(self, minute_token: str, *, owner_user_id: int) -> str:
         return f"meetings/{owner_user_id}/{minute_token}/text/summary.md"
+
+    def asr_audio_key(self, minute_token: str, *, owner_user_id: int) -> str:
+        """自建转写用的 16k 单声道音轨；长期保留，声纹样本试听也读它。"""
+        return f"meetings/{owner_user_id}/{minute_token}/audio/asr.mp3"
+
+    def asr_chunk_key(
+        self, minute_token: str, index: int, *, owner_user_id: int
+    ) -> str:
+        """分段送识别的临时切片，识别完就删。"""
+        return f"meetings/{owner_user_id}/{minute_token}/audio/chunks/{index:03d}.mp3"
+
+    async def upload_asr_audio(
+        self, path: Path, key: str, *, minute_token: str
+    ) -> None:
+        try:
+            await r2_client.upload_file(path, key, content_type="audio/mpeg")
+        except (R2ClientError, OSError) as exc:
+            raise R2ClientError(
+                f"音频上传 R2 失败 token={minute_token} key={key}: {exc}"
+            ) from exc
+
+    async def presign_asr_audio_key(self, key: str) -> str:
+        return await r2_client.presign_get(key)
+
+    async def delete_asr_audio(self, key: str) -> None:
+        await r2_client.delete_object(key)
+
+    async def presign_asr_audio(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> str | None:
+        """给声纹样本试听用；音频不在了就返回 None。"""
+        if not self.enabled():
+            return None
+        key = self.asr_audio_key(minute_token, owner_user_id=owner_user_id)
+        try:
+            if not await r2_client.exists(key):
+                return None
+            return await r2_client.presign_get(key)
+        except Exception as exc:  # noqa: BLE001 — 试听失败不该让管理页整页报错
+            logger.error("生成声纹样本音频签名失败 token=%s: %s", minute_token, exc)
+            return None
+
+    async def sync_asr_transcript_text(
+        self, minute_token: str, content: str, *, owner_user_id: int
+    ) -> bool:
+        return await self.sync_transcript_text(
+            minute_token,
+            content,
+            owner_user_id=owner_user_id,
+            filename_suffix=TRANSCRIPT_SUFFIX_ASR,
+            slot=TRANSCRIPT_SLOT_ASR,
+        )
 
     def transcript_key(
         self,
@@ -825,8 +881,12 @@ class R2MediaService:
         *,
         owner_user_id: int,
         filename_suffix: str = "txt",
+        slot: str = "transcript",
     ) -> bool:
-        """双写转写文本到 R2；失败只打日志并返回 False，不抛。"""
+        """双写转写文本到 R2；失败只打日志并返回 False，不抛。
+
+        slot 区分飞书原文与自建转写，两份各占一个 meta 槽位互不覆盖。
+        """
         if not self.enabled():
             return False
         key = self.transcript_key(
@@ -849,7 +909,7 @@ class R2MediaService:
                 minute_token, owner_user_id=owner_user_id
             )
             text_meta = dict(meta.get("text") or {})
-            text_meta["transcript"] = {
+            text_meta[slot] = {
                 "key": key,
                 "etag": etag,
                 "uploaded_at": utc_now_ms(),
@@ -913,7 +973,9 @@ class R2MediaService:
         meta = await self.read_meta_async(
             minute_token, owner_user_id=owner_user_id
         )
-        item = (meta.get("text") or {}).get("transcript")
+        text_meta = meta.get("text") or {}
+        # 自建转写覆盖全程，飞书免费版那几分钟的原文只作留档
+        item = text_meta.get(TRANSCRIPT_SLOT_ASR) or text_meta.get("transcript")
         if not isinstance(item, dict) or not item.get("key"):
             return None
         try:
@@ -977,7 +1039,12 @@ class R2MediaService:
         meta = await self.read_meta_async(
             minute_token, owner_user_id=owner_user_id
         )
-        item = (meta.get("text") or {}).get("transcript")
+        text_meta = meta.get("text") or {}
+        if text_meta.get(TRANSCRIPT_SLOT_ASR):
+            # 自建转写里写的是「说话人N」，真名要在服务端按声纹库替换后才能给出去，
+            # 直链会绕过这一步，因此这类会议只走内联正文
+            return None
+        item = text_meta.get("transcript")
         if not isinstance(item, dict) or not item.get("key"):
             return None
         try:

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db_base import Base
@@ -33,6 +33,10 @@ class MeetingRecordORM(Base):
     speakers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 飞书妙记生成时间（原始字符串，供分享库排序，避免回落到 downloaded_at）
     create_time: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 当前生效的转写来源：feishu / asr
+    transcript_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 飞书转写末条时间戳占录音时长的比例，低于阈值说明是免费版被截断
+    transcript_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

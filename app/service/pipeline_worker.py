@@ -11,13 +11,14 @@ from app.service.pipeline_job_service import update_job
 from app.service.pipeline_queue import (
     JOB_SHARE_VIDEO,
     JOB_SUMMARY,
+    JOB_TRANSCRIBE,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    claim_next_job,
     fail_stale_running,
     parse_job_mode,
     requeue_orphaned_running,
     wait_for_work,
-    claim_next_job,
 )
 from app.service.r2_media_service import r2_media_service
 from app.service.summary_event_broker import summary_broker
@@ -107,6 +108,8 @@ class PipelineWorker:
                 await self._run_summary(job)
             elif job.job_type == JOB_SHARE_VIDEO:
                 await self._run_share_video(job)
+            elif job.job_type == JOB_TRANSCRIBE:
+                await self._run_transcribe(job)
             else:
                 await update_job(
                     job.id,
@@ -163,6 +166,12 @@ class PipelineWorker:
             percent=100.0,
             finished=True,
         )
+
+    async def _run_transcribe(self, job: PipelineJobEntity) -> None:
+        """自建转写：飞书那份被截断时才会有这个作业，跑完再放纪要进队。"""
+        from app.service.transcription_flow import run_transcribe_job
+
+        await run_transcribe_job(job)
 
     async def _run_share_video(self, job: PipelineJobEntity) -> None:
         loop = asyncio.get_running_loop()

@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".ogg"}
 
+# 自建转写的文件名；与飞书原文的 transcript.txt 并存，读取时优先它
+ASR_TRANSCRIPT_FILENAME = "transcript.asr.txt"
+
 
 class MeetingStorageService:
     """本地会议资源存储：路径为 {storage_root}/{owner_user_id}/{minute_token}/。"""
@@ -203,26 +206,35 @@ class MeetingStorageService:
         )
         return transcript_path
 
-    def _read_transcript_local(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
+    def _list_transcript_files(self, minute_token: str, *, owner_user_id: int) -> list[Path]:
+        """按优先级列出转写文件：自建转写覆盖全程，排在飞书原文前面。"""
         transcript_dir = (
             self.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
             / "raw"
             / "transcript"
         )
         if not transcript_dir.is_dir():
-            return None
+            return []
+        asr: list[Path] = []
+        feishu: list[Path] = []
         for f in sorted(transcript_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in {".txt", ".srt"}:
-                try:
-                    return f.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    logger.warning(
-                        "转写文件非 UTF-8 编码 path=%s，怀疑下载时被改写，已按替换字符降级读取",
-                        f,
-                    )
-                    return f.read_text(encoding="utf-8", errors="replace")
+            if not (f.is_file() and f.suffix.lower() in {".txt", ".srt"}):
+                continue
+            (asr if f.name == ASR_TRANSCRIPT_FILENAME else feishu).append(f)
+        return asr + feishu
+
+    def _read_transcript_local(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> str | None:
+        for f in self._list_transcript_files(minute_token, owner_user_id=owner_user_id):
+            try:
+                return f.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                logger.warning(
+                    "转写文件非 UTF-8 编码 path=%s，怀疑下载时被改写，已按替换字符降级读取",
+                    f,
+                )
+                return f.read_text(encoding="utf-8", errors="replace")
         return None
 
     def read_transcript(
@@ -238,6 +250,21 @@ class MeetingStorageService:
         )
 
     async def read_transcript_async(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> str | None:
+        text = await self._read_transcript_raw(
+            minute_token, owner_user_id=owner_user_id
+        )
+        if text is None:
+            return None
+        from app.service.speaker_naming_service import apply_speaker_names
+
+        # 盘上写的是「说话人N」，真名在这里按声纹库贴上去，改名才能立刻全站生效
+        return await apply_speaker_names(
+            text, minute_token, owner_user_id=owner_user_id
+        )
+
+    async def _read_transcript_raw(
         self, minute_token: str, *, owner_user_id: int
     ) -> str | None:
         from app.service.r2_media_service import r2_media_service
@@ -267,32 +294,35 @@ class MeetingStorageService:
 
         if r2_media_service.enabled():
             try:
+                from app.service.r2_media_service import (
+                    TRANSCRIPT_SLOT_ASR,
+                    TRANSCRIPT_SUFFIX_ASR,
+                )
+
+                files = await asyncio.to_thread(
+                    self._list_transcript_files,
+                    minute_token,
+                    owner_user_id=owner_user_id,
+                )
+                source = files[0] if files else None
+                is_asr = source is not None and source.name == ASR_TRANSCRIPT_FILENAME
+                slot = TRANSCRIPT_SLOT_ASR if is_asr else "transcript"
+                suffix = (
+                    TRANSCRIPT_SUFFIX_ASR
+                    if is_asr
+                    else ((source.suffix.lstrip(".") if source else "") or "txt")
+                )
                 meta = await r2_media_service.read_meta_async(
                     minute_token, owner_user_id=owner_user_id
                 )
-                item = (meta.get("text") or {}).get("transcript")
+                item = (meta.get("text") or {}).get(slot)
                 if not (isinstance(item, dict) and item.get("key")):
-                    suffix = "txt"
-                    transcript_dir = (
-                        self.get_meeting_dir(
-                            minute_token, owner_user_id=owner_user_id
-                        )
-                        / "raw"
-                        / "transcript"
-                    )
-                    if transcript_dir.is_dir():
-                        for f in sorted(transcript_dir.iterdir()):
-                            if f.is_file() and f.suffix.lower() in {
-                                ".txt",
-                                ".srt",
-                            }:
-                                suffix = f.suffix.lstrip(".") or "txt"
-                                break
                     await r2_media_service.sync_transcript_text_safe(
                         minute_token,
                         local,
                         owner_user_id=owner_user_id,
                         filename_suffix=suffix,
+                        slot=slot,
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.error(
@@ -419,6 +449,46 @@ class MeetingStorageService:
             if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS:
                 return f
         return None
+
+    def find_media_path(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> Path | None:
+        """找出这场会议的媒体文件，音频视频都算（转写只需要声音）。"""
+        media_dir = (
+            self.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
+            / "raw"
+            / "media"
+        )
+        if not media_dir.is_dir():
+            return None
+        for f in sorted(media_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
+                return f
+        return None
+
+    def get_asr_work_dir(self, minute_token: str, *, owner_user_id: int) -> Path:
+        path = (
+            self.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
+            / "agent"
+            / "asr"
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def save_asr_transcript(
+        self, minute_token: str, content: str, *, owner_user_id: int
+    ) -> Path:
+        """自建转写单独存一个文件，飞书原文原样保留。"""
+        layout = self.ensure_layout(minute_token, owner_user_id=owner_user_id)
+        path = layout["transcript"] / ASR_TRANSCRIPT_FILENAME
+        path.write_text(content, encoding="utf-8")
+        logger.info(
+            "自建转写已保存 owner=%s token=%s path=%s",
+            owner_user_id,
+            minute_token,
+            path,
+        )
+        return path
 
     def has_summary(self, minute_token: str, *, owner_user_id: int) -> bool:
         return self.get_summary_path(

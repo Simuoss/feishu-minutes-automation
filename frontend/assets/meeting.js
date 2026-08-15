@@ -16,6 +16,7 @@ const detailState = {
   lastStatus: null,
   stageStartedAt: 0,
   progressTicker: null,
+  transcribeTimer: null,
   planCount: 0,
   activeTab: "summary",
   scrollMode: localStorage.getItem("minutes_scroll_mode") === "free" ? "free" : "follow",
@@ -637,6 +638,7 @@ function closeSummaryStreamConnection() {
 
 function closeSummaryStream() {
   closeSummaryStreamConnection();
+  stopTranscribePolling();
   detailState.streamBuffer = "";
   detailState.streamRenderScheduled = false;
   detailState.planCount = 0;
@@ -977,6 +979,50 @@ function mountDetailMedia(data) {
   return mediaElement;
 }
 
+function stopTranscribePolling() {
+  if (detailState.transcribeTimer) {
+    clearInterval(detailState.transcribeTimer);
+    detailState.transcribeTimer = null;
+  }
+}
+
+/**
+ * 自建转写阶段没有 SSE 通道（那条通道只服务纪要），所以轮询进度接口；
+ * 一旦转写作业结束、进度换成纪要，就切回 SSE。
+ */
+function followTranscribeProgress(token) {
+  stopTranscribePolling();
+  detailState.transcribeTimer = setInterval(async () => {
+    if (detailState.token !== token) {
+      stopTranscribePolling();
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        withOwnerQuery(`/meetings/${token}/summary/progress`)
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.job_type === "TRANSCRIBE" && data.status !== "FAILED") {
+        applySummaryStatus(data);
+        return;
+      }
+      stopTranscribePolling();
+      applySummaryStatus(data);
+      if (data.status === "QUEUED" || data.status === "GENERATING") {
+        openSummaryStream(token);
+      } else if (data.status === "FAILED") {
+        showSummaryProgress(true, {
+          label: `${data.stage || "失败"}：${data.error_message || "未知原因"}`,
+          statusHint: data,
+        });
+      }
+    } catch {
+      /* 轮询失败等下一拍 */
+    }
+  }, 2000);
+}
+
 async function maybeFollowSummaryStream(token) {
   try {
     const prog = await apiFetch(
@@ -985,11 +1031,78 @@ async function maybeFollowSummaryStream(token) {
     if (!prog.ok) return;
     const data = await prog.json();
     applySummaryStatus(data);
+    if (data.job_type === "TRANSCRIBE") {
+      if (data.status === "QUEUED" || data.status === "GENERATING") {
+        followTranscribeProgress(token);
+      }
+      return;
+    }
     if (data.status === "QUEUED" || data.status === "GENERATING") {
       openSummaryStream(token);
     }
   } catch {
     /* 404 / 网络：无需跟随 */
+  }
+}
+
+/**
+ * 说话人命名面板：只对超管出现。
+ * 人物库是全站共享的，普通管理员只看得到已命名的结果。
+ */
+async function loadMeetingSpeakers(minuteToken) {
+  const panel = $("#speaker-panel");
+  const list = $("#speaker-panel-list");
+  if (!panel || !list) return;
+  panel.classList.add("hidden");
+  if (!isSuperAdminView() || !getSuperJwt()) return;
+  try {
+    const res = await apiFetch(
+      withOwnerQuery(`/admin/voiceprints/meeting/${minuteToken}`)
+    );
+    if (!res.ok) return;
+    const data = await res.json();
+    const items = (data.items || []).filter((item) => item.voiceprint_id);
+    if (!items.length) return;
+    list.innerHTML = items
+      .map((item) => {
+        const minutes = Math.round((item.talk_ms || 0) / 60000);
+        const talk = minutes >= 1 ? `${minutes} 分钟` : "不足 1 分钟";
+        return `<div class="speaker-row" data-voiceprint-id="${item.voiceprint_id}">
+          <span class="speaker-label">${escapeHtml(item.local_label)}</span>
+          <span class="speaker-talk">${escapeHtml(talk)}</span>
+          <input type="text" class="speaker-name-input" maxlength="64"
+            placeholder="未命名" value="${escapeHtml(item.display_name || "")}" />
+          <button type="button" class="btn btn-sm" data-save-speaker>保存</button>
+        </div>`;
+      })
+      .join("");
+    $("#speaker-panel-status").textContent = "";
+    panel.classList.remove("hidden");
+  } catch {
+    /* 命名面板是附加能力，失败不影响看转写 */
+  }
+}
+
+async function saveSpeakerName(row) {
+  const status = $("#speaker-panel-status");
+  const id = row.dataset.voiceprintId;
+  const name = row.querySelector(".speaker-name-input")?.value || "";
+  if (!id) return;
+  try {
+    const res = await apiFetch(`/admin/voiceprints/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: name }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(typeof err.detail === "string" ? err.detail : res.statusText);
+    }
+    status.textContent = "已保存，正在刷新转写…";
+    await loadTranscript(detailState.token, detailState.mediaElement);
+    await loadMeetingSpeakers(detailState.token);
+    status.textContent = "已保存";
+  } catch (e) {
+    status.textContent = `保存失败：${e.message || e}`;
   }
 }
 
@@ -1052,6 +1165,7 @@ async function openDetail(minuteToken) {
     const sideP = Promise.all([
       loadMetrics(minuteToken),
       loadRedactionAudit(minuteToken),
+      loadMeetingSpeakers(minuteToken),
     ]);
 
     const [mediaElement, hasSummary, transcriptText] = await Promise.all([
@@ -1090,6 +1204,11 @@ async function openDetail(minuteToken) {
   }
 }
 
+$("#speaker-panel-list")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-save-speaker]");
+  const row = btn?.closest(".speaker-row");
+  if (row) saveSpeakerName(row);
+});
 $("#scroll-mode-btn").addEventListener("click", toggleScrollMode);
 $("#generate-summary-btn").addEventListener("click", generateSummary);
 $("#refresh-redaction-btn")?.addEventListener("click", () => {

@@ -5,9 +5,11 @@ from app.integrations.video.ffmpeg_client import parse_ffmpeg_out_time_ms
 from app.service.pipeline_queue import (
     JOB_SHARE_VIDEO,
     JOB_SUMMARY,
+    JOB_TRANSCRIBE,
     STATUS_QUEUED,
     STATUS_RUNNING,
     encode_job_mode,
+    job_to_progress,
     parse_job_mode,
     pick_claimable,
 )
@@ -60,6 +62,29 @@ def test_pick_claimable_limits_share_video():
     running = [_job(job_id=1, job_type=JOB_SHARE_VIDEO, status=STATUS_RUNNING)]
     assert pick_claimable(queued, running) is None
     assert pick_claimable(queued, running, max_share_video=2) is not None
+
+
+def test_pick_claimable_limits_transcribe():
+    """转写要抽音轨、跑 onnx，同时只许跑一个，但不能挡住别的类型。"""
+    queued = [
+        _job(job_id=2, job_type=JOB_TRANSCRIBE, status=STATUS_QUEUED, owner=2),
+        _job(job_id=3, job_type=JOB_SUMMARY, status=STATUS_QUEUED, owner=3),
+    ]
+    running = [_job(job_id=1, job_type=JOB_TRANSCRIBE, status=STATUS_RUNNING)]
+    picked = pick_claimable(queued, running)
+    assert picked is not None
+    assert picked.id == 3
+    assert pick_claimable(queued[:1], running, max_transcribe=2) is not None
+
+
+def test_job_to_progress_carries_job_type_for_frontend():
+    """前端靠 job_type 区分该轮询转写还是接 SSE。"""
+    job = _job(job_id=1, job_type=JOB_TRANSCRIBE, status=STATUS_RUNNING)
+    job.stage = "云端识别 2/4 段"
+    payload = job_to_progress(job, extra_stage="自建转写 · 云端识别 2/4 段")
+    assert payload["job_type"] == JOB_TRANSCRIBE
+    assert payload["stage"] == "自建转写 · 云端识别 2/4 段"
+    assert payload["status"] == "GENERATING"
 
 
 def test_parse_ffmpeg_out_time_ms():

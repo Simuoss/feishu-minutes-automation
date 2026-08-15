@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # 场景判定是一次轻量分类，用快模型省掉主模型动辄数分钟的排队；留空则回落到 llm_model
     llm_scene_model: str = "step-3.7-flash"
 
+    # 自建转写：文件异步接口在 /v1 下，与 step_plan 通道不是同一个前缀
+    step_asr_base_url: str = "https://api.stepfun.com"
+    # 留空则复用 llm_api_key（同一个平台的密钥）
+    step_asr_api_key: str = ""
+    step_asr_model: str = "stepaudio-2.5-asr"
+    # 声纹嵌入模型（sherpa-onnx 加载的 onnx 文件），相对路径按项目根解析
+    speaker_embedding_model_path: str = (
+        "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+    )
+
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
 
@@ -101,6 +111,21 @@ class Settings(BaseSettings):
     # 讲话往往滞后于画面，围绕候选时间点抽一簇再挑，单位为秒
     frame_burst_offsets: str = "-2,1,4,8"
     frame_regrab_limit: int = 3
+
+    # 飞书免费版只转写前几分钟：末条时间戳不到时长的这个比例，就判定为转写被截断，改走自建转写
+    step_asr_enabled: bool = True
+    transcript_coverage_threshold: float = 0.9
+    asr_poll_interval_seconds: float = 3.0
+    asr_max_wait_seconds: float = 1800.0
+    asr_max_attempts: int = 3
+
+    # 声纹匹配：余弦相似度高于阈值就认为是同一个人
+    # 实测 campplus 中文模型上，同人质心最低 0.68、异人最高 0.42，取中间值
+    speaker_match_threshold: float = 0.55
+    speaker_sample_count: int = 4
+    speaker_sample_seconds: float = 8.0
+    # 样本要从足够长的发言里取，太短的片段算出来的声纹不稳
+    speaker_min_segment_seconds: float = 12.0
 
     r2_signed_url_ttl_seconds: int = 7200
     r2_video_crf: int = 32

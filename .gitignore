@@ -34,6 +34,9 @@ data/feishu_user_token.json
 *.log
 .tmp/
 
+# 声纹嵌入模型（几十兆的二进制，用 scripts/download_speaker_model.py 拉）
+models/
+
 # 本地临时探针 / 冒烟 / 一次性脚本（勿再提交）
 scripts/_probe_*
 scripts/_smoke_*
