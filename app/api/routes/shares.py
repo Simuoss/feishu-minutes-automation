@@ -603,32 +603,17 @@ async def share_transcript(
     share_token: str,
     request: Request,
     x_share_session: str | None = Header(default=None),
-    inline: bool = Query(
-        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
-    ),
 ) -> LocalTranscriptResponse:
-    from app.service.r2_media_service import r2_media_service
-
     share = await _authorized_share(share_token, request, x_share_session)
     await _log_content_view(share, request, ACTION_VIEW_TRANSCRIPT)
     owner = _require_share_owner(share)
-    if not inline:
-        transcript_url = await r2_media_service.presign_transcript_text(
-            share.minute_token, owner_user_id=owner
-        )
-        if transcript_url:
-            return LocalTranscriptResponse(
-                minute_token=share.minute_token,
-                transcript="",
-                transcript_url=transcript_url,
-            )
     text = await _storage.read_transcript_async(
         share.minute_token, owner_user_id=owner
     )
     if text is None:
         raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
     return LocalTranscriptResponse(
-        minute_token=share.minute_token, transcript=text, transcript_url=None
+        minute_token=share.minute_token, transcript=text
     )
 
 
@@ -637,38 +622,10 @@ async def share_summary(
     share_token: str,
     request: Request,
     x_share_session: str | None = Header(default=None),
-    inline: bool = Query(
-        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
-    ),
 ) -> SummaryDetailResponse:
-    from app.service.metadata_db_service import read_summary_meta
-    from app.service.r2_media_service import r2_media_service
-
     share = await _authorized_share(share_token, request, x_share_session)
     await _log_content_view(share, request, ACTION_VIEW_SUMMARY)
     owner = _require_share_owner(share)
-    if not inline:
-        content_url = await r2_media_service.presign_summary_text(
-            share.minute_token, owner_user_id=owner
-        )
-        if content_url:
-            meta = await read_summary_meta(
-                share.minute_token, owner_user_id=owner
-            ) or {}
-            return SummaryDetailResponse(
-                minute_token=share.minute_token,
-                content="",
-                content_url=content_url,
-                meta=SummaryMetaData(
-                    **{
-                        k: v
-                        for k, v in meta.items()
-                        if k in SummaryMetaData.model_fields
-                    }
-                )
-                if meta
-                else None,
-            )
     detail = await _storage.read_summary_async(
         share.minute_token, owner_user_id=owner
     )
@@ -683,7 +640,6 @@ async def share_summary(
     return SummaryDetailResponse(
         minute_token=detail["minute_token"],
         content=content,
-        content_url=None,
         meta=SummaryMetaData(
             **{k: v for k, v in meta.items() if k in SummaryMetaData.model_fields}
         ),

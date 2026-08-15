@@ -12,7 +12,6 @@ class R2SyncStateEntity:
     video_status: str | None
     video_updated_at: str | None
     assets: dict[str, Any]
-    text: dict[str, Any]
     updated_at: int
 
 
@@ -25,5 +24,4 @@ class R2SyncStateUpsertEntity:
     video_status: str | None = None
     video_updated_at: str | None = None
     assets: dict[str, Any] = field(default_factory=dict)
-    text: dict[str, Any] = field(default_factory=dict)
     updated_at: int = 0

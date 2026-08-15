@@ -253,8 +253,10 @@ class MeetingStorageService:
         self, minute_token: str, *, owner_user_id: int, apply_names: bool = True
     ) -> str | None:
         """读转写。默认贴上真名；写纪要时要原始编号，传 apply_names=False。"""
-        text = await self._read_transcript_raw(
-            minute_token, owner_user_id=owner_user_id
+        text = await asyncio.to_thread(
+            self._read_transcript_local,
+            minute_token,
+            owner_user_id=owner_user_id,
         )
         if text is None or not apply_names:
             return text
@@ -264,74 +266,6 @@ class MeetingStorageService:
         return await apply_speaker_names(
             text, minute_token, owner_user_id=owner_user_id
         )
-
-    async def _read_transcript_raw(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
-        from app.service.r2_media_service import r2_media_service
-
-        if r2_media_service.enabled():
-            try:
-                remote = await r2_media_service.fetch_transcript_text(
-                    minute_token, owner_user_id=owner_user_id
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "优先从 R2 读转写失败 token=%s，将回落本地。err=%s",
-                    minute_token,
-                    exc,
-                )
-                remote = None
-            if remote is not None:
-                return remote
-
-        local = await asyncio.to_thread(
-            self._read_transcript_local,
-            minute_token,
-            owner_user_id=owner_user_id,
-        )
-        if local is None:
-            return None
-
-        if r2_media_service.enabled():
-            try:
-                from app.service.r2_media_service import (
-                    TRANSCRIPT_SLOT_ASR,
-                    TRANSCRIPT_SUFFIX_ASR,
-                )
-
-                files = await asyncio.to_thread(
-                    self._list_transcript_files,
-                    minute_token,
-                    owner_user_id=owner_user_id,
-                )
-                source = files[0] if files else None
-                is_asr = source is not None and source.name == ASR_TRANSCRIPT_FILENAME
-                slot = TRANSCRIPT_SLOT_ASR if is_asr else "transcript"
-                suffix = (
-                    TRANSCRIPT_SUFFIX_ASR
-                    if is_asr
-                    else ((source.suffix.lstrip(".") if source else "") or "txt")
-                )
-                meta = await r2_media_service.read_meta_async(
-                    minute_token, owner_user_id=owner_user_id
-                )
-                item = (meta.get("text") or {}).get(slot)
-                if not (isinstance(item, dict) and item.get("key")):
-                    await r2_media_service.sync_transcript_text_safe(
-                        minute_token,
-                        local,
-                        owner_user_id=owner_user_id,
-                        filename_suffix=suffix,
-                        slot=slot,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "本地有转写但补传 R2 失败 token=%s，本次仍返回本地内容。err=%s",
-                    minute_token,
-                    exc,
-                )
-        return local
 
     def get_summary_path(
         self, minute_token: str, *, owner_user_id: int
@@ -527,22 +461,6 @@ class MeetingStorageService:
             minute_token,
             summary_path,
         )
-        from app.service.r2_media_service import r2_media_service
-
-        if r2_media_service.enabled():
-            try:
-                await r2_media_service.sync_summary_text_safe(
-                    minute_token,
-                    content,
-                    owner_user_id=owner_user_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "纪要本地已落盘但触发 R2 双写失败 token=%s，"
-                    "公网读可能回落本地或变慢。err=%s",
-                    minute_token,
-                    exc,
-                )
         return summary_path
 
     def save_summary(
@@ -565,7 +483,6 @@ class MeetingStorageService:
         self, minute_token: str, *, owner_user_id: int
     ) -> dict[str, Any] | None:
         from app.service.metadata_db_service import read_summary_meta
-        from app.service.r2_media_service import r2_media_service
 
         async def _load_db_meta() -> dict[str, Any]:
             try:
@@ -581,25 +498,6 @@ class MeetingStorageService:
                 )
                 return {}
 
-        if r2_media_service.enabled():
-            try:
-                remote = await r2_media_service.fetch_summary_text(
-                    minute_token, owner_user_id=owner_user_id
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "优先从 R2 读纪要失败 token=%s，将回落本地。err=%s",
-                    minute_token,
-                    exc,
-                )
-                remote = None
-            if remote is not None:
-                return {
-                    "minute_token": minute_token,
-                    "content": remote,
-                    "meta": await _load_db_meta(),
-                }
-
         summary_path = self.get_summary_path(
             minute_token, owner_user_id=owner_user_id
         )
@@ -614,25 +512,6 @@ class MeetingStorageService:
             content = await asyncio.to_thread(
                 summary_path.read_text, encoding="utf-8", errors="replace"
             )
-
-        if r2_media_service.enabled():
-            try:
-                r2_meta = await r2_media_service.read_meta_async(
-                    minute_token, owner_user_id=owner_user_id
-                )
-                item = (r2_meta.get("text") or {}).get("summary")
-                if not (isinstance(item, dict) and item.get("key")):
-                    await r2_media_service.sync_summary_text_safe(
-                        minute_token,
-                        content,
-                        owner_user_id=owner_user_id,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "本地有纪要但补传 R2 失败 token=%s，本次仍返回本地内容。err=%s",
-                    minute_token,
-                    exc,
-                )
 
         return {
             "minute_token": minute_token,

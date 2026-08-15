@@ -18,10 +18,6 @@ from app.service.time_utils import utc_now_ms
 
 logger = logging.getLogger(__name__)
 
-# meta.text 里自建转写的槽位；与飞书原文的 transcript 槽位并存
-TRANSCRIPT_SLOT_ASR = "transcript_asr"
-TRANSCRIPT_SUFFIX_ASR = "asr.txt"
-
 VIDEO_STATUS_PENDING = "PENDING"
 VIDEO_STATUS_READY = "READY"
 VIDEO_STATUS_FAILED = "FAILED"
@@ -44,9 +40,6 @@ class R2MediaService:
 
     def share_video_key(self, minute_token: str, *, owner_user_id: int) -> str:
         return f"meetings/{owner_user_id}/{minute_token}/share/video.mp4"
-
-    def summary_key(self, minute_token: str, *, owner_user_id: int) -> str:
-        return f"meetings/{owner_user_id}/{minute_token}/text/summary.md"
 
     def asr_audio_key(self, minute_token: str, *, owner_user_id: int) -> str:
         """自建转写用的 16k 单声道音轨；长期保留，声纹样本试听也读它。"""
@@ -88,27 +81,6 @@ class R2MediaService:
         except Exception as exc:  # noqa: BLE001 — 试听失败不该让管理页整页报错
             logger.error("生成声纹样本音频签名失败 token=%s: %s", minute_token, exc)
             return None
-
-    async def sync_asr_transcript_text(
-        self, minute_token: str, content: str, *, owner_user_id: int
-    ) -> bool:
-        return await self.sync_transcript_text(
-            minute_token,
-            content,
-            owner_user_id=owner_user_id,
-            filename_suffix=TRANSCRIPT_SUFFIX_ASR,
-            slot=TRANSCRIPT_SLOT_ASR,
-        )
-
-    def transcript_key(
-        self,
-        minute_token: str,
-        *,
-        owner_user_id: int,
-        filename_suffix: str = "txt",
-    ) -> str:
-        suffix = (filename_suffix or "txt").strip().lstrip(".") or "txt"
-        return f"meetings/{owner_user_id}/{minute_token}/text/transcript.{suffix}"
 
     def _assert_owned_object_key(
         self, key: str, *, owner_user_id: int, minute_token: str
@@ -155,11 +127,10 @@ class R2MediaService:
     @staticmethod
     def _normalize_meta(data: dict[str, Any] | None) -> dict[str, Any]:
         if not data:
-            return {"assets": {}, "video": {}, "text": {}}
+            return {"assets": {}, "video": {}}
         assets = data.get("assets") if isinstance(data.get("assets"), dict) else {}
         video = data.get("video") if isinstance(data.get("video"), dict) else {}
-        text = data.get("text") if isinstance(data.get("text"), dict) else {}
-        return {"assets": assets, "video": video, "text": text}
+        return {"assets": assets, "video": video}
 
     async def read_meta_async(
         self, minute_token: str, *, owner_user_id: int
@@ -174,7 +145,7 @@ class R2MediaService:
                 minute_token,
                 exc,
             )
-            return {"assets": {}, "video": {}, "text": {}}
+            return {"assets": {}, "video": {}}
         return self._normalize_meta(data)
 
     def read_meta(self, minute_token: str, *, owner_user_id: int) -> dict[str, Any]:
@@ -211,10 +182,9 @@ class R2MediaService:
                     minute_token,
                     exc,
                 )
-                current = {"assets": {}, "video": {}, "text": {}}
+                current = {"assets": {}, "video": {}}
             merged = {
                 "assets": {**current["assets"], **incoming["assets"]},
-                "text": {**current["text"], **incoming["text"]},
                 "video": (
                     incoming["video"]
                     if incoming["video"]
@@ -829,284 +799,6 @@ class R2MediaService:
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "纪要配图同步 R2 失败 token=%s，本地文件暂保留: %s",
-                minute_token,
-                exc,
-            )
-
-    async def sync_summary_text(
-        self,
-        minute_token: str,
-        content: str,
-        *,
-        owner_user_id: int,
-    ) -> bool:
-        """双写纪要正文到 R2；失败只打日志并返回 False，不抛。"""
-        if not self.enabled():
-            return False
-        key = self.summary_key(minute_token, owner_user_id=owner_user_id)
-        try:
-            etag = await r2_client.upload_bytes(
-                content.encode("utf-8"),
-                key,
-                content_type="text/markdown; charset=utf-8",
-            )
-            meta = await self.read_meta_async(
-                minute_token, owner_user_id=owner_user_id
-            )
-            text_meta = dict(meta.get("text") or {})
-            text_meta["summary"] = {
-                "key": key,
-                "etag": etag,
-                "uploaded_at": utc_now_ms(),
-            }
-            meta["text"] = text_meta
-            await self.write_meta_async(
-                minute_token, meta, owner_user_id=owner_user_id
-            )
-            logger.info("纪要正文已同步到 R2 token=%s key=%s", minute_token, key)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "纪要正文上传 R2 失败 token=%s，本地已落盘；"
-                "公网读可能回落本地或变慢。err=%s",
-                minute_token,
-                exc,
-            )
-            return False
-
-    async def sync_transcript_text(
-        self,
-        minute_token: str,
-        content: str | bytes,
-        *,
-        owner_user_id: int,
-        filename_suffix: str = "txt",
-        slot: str = "transcript",
-    ) -> bool:
-        """双写转写文本到 R2；失败只打日志并返回 False，不抛。
-
-        slot 区分飞书原文与自建转写，两份各占一个 meta 槽位互不覆盖。
-        """
-        if not self.enabled():
-            return False
-        key = self.transcript_key(
-            minute_token,
-            owner_user_id=owner_user_id,
-            filename_suffix=filename_suffix,
-        )
-        try:
-            data = (
-                content
-                if isinstance(content, (bytes, bytearray))
-                else str(content).encode("utf-8")
-            )
-            etag = await r2_client.upload_bytes(
-                bytes(data),
-                key,
-                content_type="text/plain; charset=utf-8",
-            )
-            meta = await self.read_meta_async(
-                minute_token, owner_user_id=owner_user_id
-            )
-            text_meta = dict(meta.get("text") or {})
-            text_meta[slot] = {
-                "key": key,
-                "etag": etag,
-                "uploaded_at": utc_now_ms(),
-            }
-            meta["text"] = text_meta
-            await self.write_meta_async(
-                minute_token, meta, owner_user_id=owner_user_id
-            )
-            logger.info("转写文本已同步到 R2 token=%s key=%s", minute_token, key)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "转写文本上传 R2 失败 token=%s，本地已落盘；"
-                "公网读可能回落本地或变慢。err=%s",
-                minute_token,
-                exc,
-            )
-            return False
-
-    async def fetch_summary_text(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
-        if not self.enabled():
-            return None
-        meta = await self.read_meta_async(
-            minute_token, owner_user_id=owner_user_id
-        )
-        item = (meta.get("text") or {}).get("summary")
-        if not isinstance(item, dict) or not item.get("key"):
-            return None
-        try:
-            object_key = self._assert_owned_object_key(
-                str(item["key"]),
-                owner_user_id=owner_user_id,
-                minute_token=minute_token,
-            )
-            data = await r2_client.get_bytes(object_key)
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError:
-                logger.warning(
-                    "R2 纪要正文非 UTF-8 token=%s，已按替换字符降级解码",
-                    minute_token,
-                )
-                return data.decode("utf-8", errors="replace")
-        except ValueError:
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "从 R2 读取纪要正文失败 token=%s，将回落本地。err=%s",
-                minute_token,
-                exc,
-            )
-            return None
-
-    async def fetch_transcript_text(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
-        if not self.enabled():
-            return None
-        meta = await self.read_meta_async(
-            minute_token, owner_user_id=owner_user_id
-        )
-        text_meta = meta.get("text") or {}
-        # 自建转写覆盖全程，飞书免费版那几分钟的原文只作留档
-        item = text_meta.get(TRANSCRIPT_SLOT_ASR) or text_meta.get("transcript")
-        if not isinstance(item, dict) or not item.get("key"):
-            return None
-        try:
-            object_key = self._assert_owned_object_key(
-                str(item["key"]),
-                owner_user_id=owner_user_id,
-                minute_token=minute_token,
-            )
-            data = await r2_client.get_bytes(object_key)
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError:
-                logger.warning(
-                    "R2 转写文本非 UTF-8 token=%s，已按替换字符降级解码",
-                    minute_token,
-                )
-                return data.decode("utf-8", errors="replace")
-        except ValueError:
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "从 R2 读取转写文本失败 token=%s，将回落本地。err=%s",
-                minute_token,
-                exc,
-            )
-            return None
-
-    async def presign_summary_text(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
-        if not self.enabled():
-            return None
-        meta = await self.read_meta_async(
-            minute_token, owner_user_id=owner_user_id
-        )
-        text_meta = meta.get("text") or {}
-        if text_meta.get(TRANSCRIPT_SLOT_ASR):
-            # 自建转写的会议，纪要正文里也写着「说话人N」，真名要在服务端按声纹库
-            # 替换后才能给出去；直链绕过这一步，所以这类会议只走内联正文
-            return None
-        item = text_meta.get("summary")
-        if not isinstance(item, dict) or not item.get("key"):
-            return None
-        try:
-            object_key = self._assert_owned_object_key(
-                str(item["key"]),
-                owner_user_id=owner_user_id,
-                minute_token=minute_token,
-            )
-            return await r2_client.presign_get(object_key)
-        except ValueError:
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "纪要正文签名 URL 生成失败 token=%s，将回落隧道传正文。err=%s",
-                minute_token,
-                exc,
-            )
-            return None
-
-    async def presign_transcript_text(
-        self, minute_token: str, *, owner_user_id: int
-    ) -> str | None:
-        if not self.enabled():
-            return None
-        meta = await self.read_meta_async(
-            minute_token, owner_user_id=owner_user_id
-        )
-        text_meta = meta.get("text") or {}
-        if text_meta.get(TRANSCRIPT_SLOT_ASR):
-            # 自建转写里写的是「说话人N」，真名要在服务端按声纹库替换后才能给出去，
-            # 直链会绕过这一步，因此这类会议只走内联正文
-            return None
-        item = text_meta.get("transcript")
-        if not isinstance(item, dict) or not item.get("key"):
-            return None
-        try:
-            object_key = self._assert_owned_object_key(
-                str(item["key"]),
-                owner_user_id=owner_user_id,
-                minute_token=minute_token,
-            )
-            return await r2_client.presign_get(object_key)
-        except ValueError:
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "转写正文签名 URL 生成失败 token=%s，将回落隧道传正文。err=%s",
-                minute_token,
-                exc,
-            )
-            return None
-
-    async def sync_summary_text_safe(
-        self,
-        minute_token: str,
-        content: str,
-        *,
-        owner_user_id: int,
-    ) -> None:
-        try:
-            await self.sync_summary_text(
-                minute_token, content, owner_user_id=owner_user_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "纪要正文同步 R2 异常 token=%s，本地已落盘；"
-                "公网读可能回落本地或变慢。err=%s",
-                minute_token,
-                exc,
-            )
-
-    async def sync_transcript_text_safe(
-        self,
-        minute_token: str,
-        content: str | bytes,
-        *,
-        owner_user_id: int,
-        filename_suffix: str = "txt",
-    ) -> None:
-        try:
-            await self.sync_transcript_text(
-                minute_token,
-                content,
-                owner_user_id=owner_user_id,
-                filename_suffix=filename_suffix,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "转写文本同步 R2 异常 token=%s，本地已落盘；"
-                "公网读可能回落本地或变慢。err=%s",
                 minute_token,
                 exc,
             )

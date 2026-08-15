@@ -265,7 +265,6 @@ class FakeExtractor:
 
 class FakeR2:
     def __init__(self) -> None:
-        self.transcripts: dict[str, str] = {}
         self.deleted: list[str] = []
 
     def enabled(self) -> bool:
@@ -285,11 +284,6 @@ class FakeR2:
 
     async def delete_asr_audio(self, key: str) -> None:
         self.deleted.append(key)
-
-    async def sync_asr_transcript_text(
-        self, minute_token: str, text: str, *, owner_user_id: int
-    ) -> None:
-        self.transcripts[minute_token] = text
 
 
 @pytest.fixture
@@ -394,7 +388,6 @@ def test_transcribe_merges_speakers_across_chunks(tmp_path: Path, rig: Rig):
     )
     assert saved.is_file()
     assert saved.read_text(encoding="utf-8") == result.transcript
-    assert rig.r2.transcripts[TOKEN] == result.transcript
 
     # 同一个人的两次发言必须挂同一个编号，否则纪要会把一个人当两个人写
     lines = [ln for ln in result.transcript.splitlines() if ln.startswith("说话人")]

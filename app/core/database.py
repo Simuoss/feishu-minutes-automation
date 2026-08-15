@@ -49,7 +49,6 @@ _SQLITE_ALTER_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "r2_sync_states": [
         ("owner_user_id", "INTEGER"),
-        ("text_json", "TEXT"),
     ],
     "figures": [
         ("owner_user_id", "INTEGER"),

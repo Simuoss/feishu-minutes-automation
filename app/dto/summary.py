@@ -89,9 +89,7 @@ class SummaryMetaData(BaseModel):
 
 class SummaryDetailResponse(BaseModel):
     minute_token: str
-    # 有 content_url 时 content 可为空：前端应直连 R2；inline=1 时才内嵌正文
     content: str = ""
-    content_url: str | None = None
     meta: SummaryMetaData | None = None
 
 

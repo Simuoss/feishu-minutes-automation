@@ -616,11 +616,7 @@ async function loadSummary(token, { loadSide = true } = {}) {
     }
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
-    const content = await resolveTextPayload(data, {
-      kind: "summary",
-      inlineFetcher: apiFetch,
-      inlinePath: path,
-    });
+    const content = data.content || "";
     renderSummary(content, data.meta, { loadSide });
     return Boolean(content);
   } catch {
@@ -901,11 +897,7 @@ async function fetchTranscriptText(minuteToken) {
   const res = await apiFetch(path);
   if (!res.ok) throw new Error("转写加载失败");
   const data = await res.json();
-  return resolveTextPayload(data, {
-    kind: "transcript",
-    inlineFetcher: apiFetch,
-    inlinePath: path,
-  });
+  return data.transcript || "";
 }
 
 function applyTranscript(text, mediaElement) {

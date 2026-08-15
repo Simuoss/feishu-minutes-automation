@@ -95,6 +95,4 @@ class LocalMeetingDetailResponse(BaseModel):
 
 class LocalTranscriptResponse(BaseModel):
     minute_token: str
-    # 有 transcript_url 时 transcript 可为空：前端应直连 R2；inline=1 时才内嵌正文
     transcript: str = ""
-    transcript_url: str | None = None

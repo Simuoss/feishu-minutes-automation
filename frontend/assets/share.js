@@ -543,11 +543,7 @@ async function openDetail({ allowKeyRetry = true } = {}) {
         return false;
       }
       const sum = await sumRes.json();
-      shareState.summaryMarkdown = await resolveTextPayload(sum, {
-        kind: "summary",
-        inlineFetcher: shareFetch,
-        inlinePath: `/share/${shareToken}/summary`,
-      });
+      shareState.summaryMarkdown = sum.content || "";
       const ok = Boolean(shareState.summaryMarkdown);
       $("#summary-content").innerHTML = ok
         ? renderMarkdown(shareState.summaryMarkdown)
@@ -571,11 +567,7 @@ async function openDetail({ allowKeyRetry = true } = {}) {
             return;
           }
           const tData = await tRes.json();
-          const text = await resolveTextPayload(tData, {
-            kind: "transcript",
-            inlineFetcher: shareFetch,
-            inlinePath: `/share/${shareToken}/transcript`,
-          });
+          const text = tData.transcript || "";
           shareState.fullTranscriptText = text;
           if (text) {
             if (mediaElement) setupDetailSync(mediaElement, text);

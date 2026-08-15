@@ -421,37 +421,6 @@ function renderAccessLogGroups(logs, options = {}) {
     .join("");
 }
 
-/**
- * 正文优先走 R2 签名 URL（浏览器直连）；失败再回落内嵌字段或 inline API。
- * @param {{ content?: string, content_url?: string, transcript?: string, transcript_url?: string }} data
- * @param {{ kind: 'summary'|'transcript', inlineFetcher?: (path: string) => Promise<Response>, inlinePath?: string }} options
- */
-async function resolveTextPayload(data, options) {
-  const kind = options.kind || "summary";
-  const urlField = kind === "transcript" ? "transcript_url" : "content_url";
-  const bodyField = kind === "transcript" ? "transcript" : "content";
-  const url = (data && data[urlField]) || "";
-  if (url) {
-    try {
-      const res = await fetch(url, { mode: "cors", credentials: "omit" });
-      if (res.ok) return await res.text();
-      console.warn("R2 正文直连失败，将回落 API", res.status, url);
-    } catch (err) {
-      console.warn("R2 正文直连异常，将回落 API", err);
-    }
-  }
-  const embedded = (data && data[bodyField]) || "";
-  if (embedded) return embedded;
-  if (options.inlineFetcher && options.inlinePath) {
-    const sep = options.inlinePath.includes("?") ? "&" : "?";
-    const res = await options.inlineFetcher(`${options.inlinePath}${sep}inline=1`);
-    if (!res.ok) throw new Error(`正文回落加载失败 HTTP ${res.status}`);
-    const again = await res.json();
-    return (again && again[bodyField]) || "";
-  }
-  return "";
-}
-
 /** Remix Icon：传入不含 ri- 前缀的类名片段，如 "search-line" */
 function iconHtml(name) {
   return `<i class="ri ri-${name}" aria-hidden="true"></i>`;

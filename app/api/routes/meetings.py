@@ -306,33 +306,16 @@ async def get_local_transcript(
     minute_token: str,
     request: Request,
     owner_user_id: int | None = None,
-    inline: bool = Query(
-        False, description="为 true 时强制经 API 内嵌正文（不走 R2 直链）"
-    ),
 ) -> LocalTranscriptResponse:
-    from app.service.r2_media_service import r2_media_service
-
     owner = await assert_meeting_readable(
         request, minute_token, owner_user_id=owner_user_id
     )
-    if not inline:
-        transcript_url = await r2_media_service.presign_transcript_text(
-            minute_token, owner_user_id=owner
-        )
-        if transcript_url:
-            return LocalTranscriptResponse(
-                minute_token=minute_token,
-                transcript="",
-                transcript_url=transcript_url,
-            )
     text = await _storage.read_transcript_async(
         minute_token, owner_user_id=owner
     )
     if text is None:
         raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
-    return LocalTranscriptResponse(
-        minute_token=minute_token, transcript=text, transcript_url=None
-    )
+    return LocalTranscriptResponse(minute_token=minute_token, transcript=text)
 
 
 @router.get("/local/{minute_token}/media/{filename}")

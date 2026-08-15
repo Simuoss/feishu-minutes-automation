@@ -473,14 +473,6 @@ class MeetingDownloadService:
                     minute_token, transcript_bytes, owner_user_id=owner_id
                 )
             )
-            from app.service.r2_media_service import r2_media_service
-
-            if r2_media_service.enabled():
-                await r2_media_service.sync_transcript_text_safe(
-                    minute_token,
-                    transcript_bytes,
-                    owner_user_id=owner_id,
-                )
             try:
                 speakers = extract_unique_speakers(
                     transcript_bytes.decode("utf-8", errors="replace")

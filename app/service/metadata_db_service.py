@@ -338,7 +338,6 @@ async def upsert_r2_meta(
     owner_id = require_owner_user_id(owner_user_id)
     video = meta.get("video") if isinstance(meta.get("video"), dict) else {}
     assets = meta.get("assets") if isinstance(meta.get("assets"), dict) else {}
-    text = meta.get("text") if isinstance(meta.get("text"), dict) else {}
     async with UnitOfWork() as uow:
         assert uow.r2_sync_states is not None
         await uow.r2_sync_states.upsert(
@@ -350,7 +349,6 @@ async def upsert_r2_meta(
                 video_status=video.get("status"),
                 video_updated_at=video.get("updated_at"),
                 assets=assets,
-                text=text,
                 updated_at=_now_ms(),
             )
         )
@@ -500,7 +498,6 @@ async def read_r2_meta(
         return {
             "assets": entity.assets or {},
             "video": video,
-            "text": entity.text or {},
         }
 
 

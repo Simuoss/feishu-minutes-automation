@@ -255,9 +255,6 @@ class TranscriptionService:
             transcript,
             owner_user_id=owner_user_id,
         )
-        await r2_media_service.sync_asr_transcript_text(
-            minute_token, transcript, owner_user_id=owner_user_id
-        )
         audio_path.unlink(missing_ok=True)
 
         progress("转写完成", 98.0)
