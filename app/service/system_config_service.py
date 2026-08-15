@@ -168,6 +168,24 @@ def default_catalog() -> list[SystemConfigCreateEntity]:
             remark="",
         ),
         SystemConfigCreateEntity(
+            key="ASR_CHUNK_MINUTES",
+            description="单次送识别的音频长度（分钟）",
+            value=str(settings.asr_chunk_minutes),
+            remark="调大容易被识别服务整段拒收",
+        ),
+        SystemConfigCreateEntity(
+            key="ASR_CHUNK_CONCURRENCY",
+            description="同时送识别的分段数",
+            value=str(settings.asr_chunk_concurrency),
+            remark="",
+        ),
+        SystemConfigCreateEntity(
+            key="ASR_BOUNDARY_SEARCH_SECONDS",
+            description="分段边界向前后找静音的范围（秒）",
+            value=str(settings.asr_boundary_search_seconds),
+            remark="把刀口挪到没人说话处，避免劈断句子；填 0 则按整数倍硬切",
+        ),
+        SystemConfigCreateEntity(
             key="SPEAKER_MATCH_THRESHOLD",
             description="声纹匹配阈值（余弦相似度）",
             value=str(settings.speaker_match_threshold),

@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,11 @@ FRAME_TIMEOUT_SECONDS = 60.0
 PROBE_TIMEOUT_SECONDS = 30.0
 # 抽音轨要走完整个文件，几小时的录像也得留够时间
 AUDIO_EXTRACT_TIMEOUT_SECONDS = 1800.0
+
+
+# silencedetect 把结果打在 stderr 的 info 日志里，只能靠文本解析
+_SILENCE_START_RE = re.compile(r"silence_start:\s*(-?\d+(?:\.\d+)?)")
+_SILENCE_END_RE = re.compile(r"silence_end:\s*(-?\d+(?:\.\d+)?)")
 
 
 class FfmpegError(RuntimeError):
@@ -293,6 +299,74 @@ class FfmpegClient:
             dest.unlink(missing_ok=True)
             return None
         return dest
+
+    async def detect_silence(
+        self,
+        media_path: Path,
+        start_seconds: float,
+        duration_seconds: float,
+        *,
+        noise_db: float = -30.0,
+        min_silence_seconds: float = 0.4,
+    ) -> list[tuple[float, float]]:
+        """找出一段音频里的静音区间，返回绝对秒数的 (起, 止) 列表。
+
+        只扫窗口内的这一小段，一次几十毫秒。找不到静音、或 ffmpeg 报错，
+        都返回空列表交给调用方自己兜底，不往上抛。
+        """
+        if not media_path.is_file() or duration_seconds <= 0:
+            return []
+        cmd = [
+            self._ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            # silencedetect 是 info 级日志，压到 error 就什么都看不到了
+            "-loglevel",
+            "info",
+            "-ss",
+            format_timestamp(start_seconds),
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-i",
+            str(media_path),
+            "-vn",
+            "-af",
+            f"silencedetect=noise={noise_db}dB:d={min_silence_seconds}",
+            "-f",
+            "null",
+            "-",
+        ]
+        try:
+            code, _stdout, stderr = await _run(cmd, FRAME_TIMEOUT_SECONDS)
+        except (FileNotFoundError, FfmpegError) as exc:
+            logger.warning("静音探测失败 t=%.1fs：%s", start_seconds, exc)
+            return []
+        if code != 0:
+            logger.warning(
+                "静音探测返回 code=%s t=%.1fs：%s",
+                code,
+                start_seconds,
+                stderr.decode("utf-8", errors="replace")[:200],
+            )
+            return []
+
+        # -ss 放在 -i 前，滤镜看到的时间从 0 开始，加回窗口起点才是绝对时间
+        window_end = start_seconds + duration_seconds
+        spans: list[tuple[float, float]] = []
+        pending: float | None = None
+        for line in stderr.decode("utf-8", errors="replace").splitlines():
+            begin = _SILENCE_START_RE.search(line)
+            if begin:
+                pending = start_seconds + float(begin.group(1))
+            finish = _SILENCE_END_RE.search(line)
+            if finish and pending is not None:
+                spans.append((pending, min(window_end, start_seconds + float(finish.group(1)))))
+                pending = None
+        # 静音一直延续到窗口末尾时只有 silence_start，没有配对的结束
+        if pending is not None:
+            spans.append((pending, window_end))
+        return [(max(start_seconds, a), b) for a, b in spans if b > a]
 
     async def extract_burst(
         self,

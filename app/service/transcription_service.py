@@ -43,6 +43,11 @@ SAMPLES_PER_SPEAKER = 3
 CENTROID_WEIGHT_CAP = 30
 # 识别失败时对半重试的下限，再小就直接放弃这一小段
 MIN_RETRY_SPLIT_SECONDS = 90.0
+# 分段边界向前后各找这么久的静音，把刀口挪到没人说话的地方
+BOUNDARY_SEARCH_SECONDS = 15.0
+# 判定静音的音量门限与最短持续时间
+SILENCE_NOISE_DB = -30.0
+SILENCE_MIN_SECONDS = 0.4
 
 
 class TranscriptionError(RuntimeError):
@@ -248,6 +253,70 @@ class TranscriptionService:
 
     # ---------- 分段识别 ----------
 
+    async def _chunk_bounds(
+        self, audio_path: Path, total_seconds: float, chunk_seconds: float
+    ) -> list[tuple[float, float]]:
+        """算出每段的 (起点, 时长)，尽量让刀口落在静音处。
+
+        按整数倍硬切会把一句话劈成两半：两边各得到一个残缺分句，接缝处的人还会
+        因为分属两次调用而多出一个待认的候选。所以在算术边界附近找一段静音把刀口
+        挪过去，找不到就留在原位，不影响流程。
+        """
+        count = int((total_seconds - 0.5) // chunk_seconds) + 1
+        if count <= 1:
+            return [(0.0, total_seconds)]
+
+        raw = [index * chunk_seconds for index in range(1, count)]
+        window = runtime_config.get_float(
+            "ASR_BOUNDARY_SEARCH_SECONDS", BOUNDARY_SEARCH_SECONDS
+        )
+        # 窗口不能大到让相邻边界够得着彼此，否则挪完可能前后颠倒
+        window = min(window, chunk_seconds / 4)
+        if window <= 0:
+            points = raw
+        else:
+            points = list(
+                await asyncio.gather(
+                    *(
+                        self._snap_boundary(audio_path, at, window, total_seconds)
+                        for at in raw
+                    )
+                )
+            )
+
+        edges = [0.0, *points, total_seconds]
+        return [
+            (edges[i], edges[i + 1] - edges[i])
+            for i in range(len(edges) - 1)
+            if edges[i + 1] - edges[i] > 0.5
+        ]
+
+    async def _snap_boundary(
+        self, audio_path: Path, boundary: float, window: float, total_seconds: float
+    ) -> float:
+        """把一个分段边界挪到附近最近的静音中点。"""
+        start = max(0.0, boundary - window)
+        end = min(total_seconds, boundary + window)
+        if end - start < 1.0:
+            return boundary
+        spans = await ffmpeg_client.detect_silence(
+            audio_path,
+            start,
+            end - start,
+            noise_db=SILENCE_NOISE_DB,
+            min_silence_seconds=SILENCE_MIN_SECONDS,
+        )
+        best: float | None = None
+        for span_start, span_end in spans:
+            middle = (max(span_start, start) + min(span_end, end)) / 2
+            if best is None or abs(middle - boundary) < abs(best - boundary):
+                best = middle
+        if best is None:
+            logger.info("边界 %.0fs 附近没找到静音，按原位切开", boundary)
+            return boundary
+        logger.info("边界 %.0fs 挪到静音处 %.1fs", boundary, best)
+        return best
+
     async def _transcribe_chunks(
         self,
         audio_path: Path,
@@ -264,11 +333,8 @@ class TranscriptionService:
         chunk_seconds = max(
             60.0, runtime_config.get_float("ASR_CHUNK_MINUTES", 15.0) * 60.0
         )
-        starts = [
-            index * chunk_seconds
-            for index in range(int((total_seconds - 0.5) // chunk_seconds) + 1)
-        ]
-        total_chunks = len(starts)
+        bounds = await self._chunk_bounds(audio_path, total_seconds, chunk_seconds)
+        total_chunks = len(bounds)
         done = 0
         skipped = 0.0
         part_seq = 0
@@ -378,9 +444,9 @@ class TranscriptionService:
                 for item in utterances
             ]
 
-        async def run_chunk(index: int, start: float) -> list[_ChunkUtterance]:
+        async def run_chunk(index: int, start: float, length: float) -> list[_ChunkUtterance]:
             nonlocal done
-            items = await run_segment(index, start, min(chunk_seconds, total_seconds - start))
+            items = await run_segment(index, start, length)
             async with lock:
                 done += 1
                 progress(
@@ -391,7 +457,10 @@ class TranscriptionService:
 
         progress(f"云端识别 0/{total_chunks} 段", 16.0)
         chunks = await asyncio.gather(
-            *(run_chunk(index, start) for index, start in enumerate(starts))
+            *(
+                run_chunk(index, start, length)
+                for index, (start, length) in enumerate(bounds)
+            )
         )
         merged = [item for chunk in chunks for item in chunk]
         merged.sort(key=lambda item: (item.start_ms, item.end_ms))

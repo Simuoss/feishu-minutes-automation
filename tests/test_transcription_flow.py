@@ -215,8 +215,18 @@ class FakeFfmpeg:
     class _Info:
         duration_seconds = TOTAL_SECONDS
 
-    def __init__(self, cuts: Cuts) -> None:
+    def __init__(self, cuts: Cuts, silences: list[tuple[float, float]] | None = None) -> None:
         self._cuts = cuts
+        # 整场录音里的静音区间，探测时只返回落在窗口内的那些
+        self._silences = silences if silences is not None else []
+
+    async def detect_silence(self, media_path, start_seconds, duration_seconds, **kwargs):
+        end = start_seconds + duration_seconds
+        return [
+            (max(a, start_seconds), min(b, end))
+            for a, b in self._silences
+            if b > start_seconds and a < end
+        ]
 
     async def extract_audio(
         self, media_path, dest, *, start_seconds=None, duration_seconds=None, **kwargs
@@ -328,12 +338,14 @@ class Rig:
     def __init__(self) -> None:
         self.cuts = Cuts()
         self.r2 = FakeR2()
+        # 录音里的静音区间；留空则边界落在算术位置
+        self.silences: list[tuple[float, float]] = []
 
 
 @pytest.fixture
 def rig(monkeypatch: pytest.MonkeyPatch) -> Rig:
     item = Rig()
-    ffmpeg = FakeFfmpeg(item.cuts)
+    ffmpeg = FakeFfmpeg(item.cuts, item.silences)
     monkeypatch.setattr("app.service.r2_media_service.r2_media_service", item.r2)
     monkeypatch.setattr("app.integrations.video.ffmpeg_client.ffmpeg_client", ffmpeg)
     monkeypatch.setattr("app.service.transcription_service.ffmpeg_client", ffmpeg)
@@ -393,6 +405,32 @@ def test_transcribe_merges_speakers_across_chunks(tmp_path: Path, rig: Rig):
     # 分段音频用完即删，只留整段的那份供试听
     assert len(rig.r2.deleted) == 2
     assert all("chunk_" in key for key in rig.r2.deleted)
+
+
+@pytest.mark.usefixtures("_runtime_defaults", "_memory_db")
+def test_chunk_boundary_moves_to_the_nearest_silence(tmp_path: Path, rig: Rig):
+    """硬切会把一句话劈成两半，边界附近有静音就挪过去，且挑最近的那处。"""
+    rig.silences.extend([(886.0, 887.0), (893.0, 897.0)])
+    storage = _storage_with_media(tmp_path, TOKEN)
+    asr = FakeAsrClient(rig.cuts)
+
+    result = _run_transcribe(storage, TOKEN, asr)
+
+    spans = sorted((round(s, 1), round(ln, 1)) for s, ln in asr.calls)
+    assert spans == [(0.0, 895.0), (895.0, 905.0)]
+    assert result.utterances == 4
+    assert len(result.speakers) == 2
+
+
+@pytest.mark.usefixtures("_runtime_defaults", "_memory_db")
+def test_boundary_stays_put_when_nothing_is_quiet(tmp_path: Path, rig: Rig):
+    """整段都在说话就别硬找静音，老老实实按整数倍切。"""
+    storage = _storage_with_media(tmp_path, TOKEN)
+    asr = FakeAsrClient(rig.cuts)
+
+    _run_transcribe(storage, TOKEN, asr)
+
+    assert sorted((round(s), round(ln)) for s, ln in asr.calls) == [(0, 900), (900, 900)]
 
 
 @pytest.mark.usefixtures("_runtime_defaults", "_memory_db")

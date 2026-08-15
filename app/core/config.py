@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     asr_poll_interval_seconds: float = 3.0
     asr_max_wait_seconds: float = 1800.0
     asr_max_attempts: int = 3
+    # 单次识别的音频长度：实测二十几分钟就会被拒，15 分钟留了余量
+    asr_chunk_minutes: float = 15.0
+    asr_chunk_concurrency: int = 3
+    # 在分段边界前后各找这么久的静音，把刀口挪过去避免劈断句子；0 表示按整数倍硬切
+    asr_boundary_search_seconds: float = 15.0
 
     # 声纹匹配：余弦相似度高于阈值就认为是同一个人
     # 实测 campplus 中文模型上，同人质心最低 0.68、异人最高 0.42，取中间值
