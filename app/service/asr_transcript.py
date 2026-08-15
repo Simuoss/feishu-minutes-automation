@@ -122,3 +122,19 @@ def apply_display_names(transcript: str, names: dict[str, str]) -> str:
         re.MULTILINE,
     )
     return pattern.sub(_replace, transcript)
+
+
+def apply_display_names_everywhere(text: str, names: dict[str, str]) -> str:
+    """任意位置的「说话人N」都换成真名，供纪要这类散文使用。
+
+    必须整体匹配「说话人」加数字再查表：逐个字符串替换的话，「说话人1」那条规则
+    会啃掉「说话人10」的前四个字，剩一个孤零零的 0。
+    """
+    if not names or not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        display = names.get(match.group(0))
+        return display or match.group(0)
+
+    return re.sub(rf"{LOCAL_LABEL_PREFIX}\d+", _replace, text)

@@ -22,6 +22,7 @@ from app.service.pipeline_queue import (
     JOB_TRANSCRIBE,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    encode_job_mode,
     enqueue_job,
 )
 from app.service.transcript_anchor import extract_unique_speakers
@@ -205,17 +206,18 @@ async def run_transcribe_job(job: PipelineJobEntity) -> None:
         percent=100.0,
         finished=True,
     )
-    await _enqueue_summary(job)
+    # 必须强制重跑：说话人编号是这次转写重排出来的，旧纪要正文里的编号已经对不上
+    await _enqueue_summary(job, force=True)
 
 
-async def _enqueue_summary(job: PipelineJobEntity) -> None:
+async def _enqueue_summary(job: PipelineJobEntity, *, force: bool = False) -> None:
     if not runtime_config.get_bool("SUMMARY_AUTO_GENERATE", True):
         return
     await enqueue_job(
         job.minute_token,
         owner_user_id=job.owner_user_id,
         job_type=JOB_SUMMARY,
-        mode="FULL",
+        mode=encode_job_mode("FULL", force=force),
     )
 
 

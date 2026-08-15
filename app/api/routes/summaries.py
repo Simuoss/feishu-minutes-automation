@@ -25,6 +25,7 @@ from app.dto.summary import (
     SummaryProgressBatchResponse,
     SummaryProgressResponse,
 )
+from app.service import speaker_naming_service
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.ownership import (
     assert_meeting_progress_visible,
@@ -381,9 +382,12 @@ async def get_summary(
     if detail is None:
         raise HTTPException(status_code=404, detail="该会议尚未生成纪要")
     meta = detail.get("meta") or {}
+    content = await speaker_naming_service.apply_speaker_names_to_summary(
+        detail["content"], minute_token, owner_user_id=owner
+    )
     return SummaryDetailResponse(
         minute_token=detail["minute_token"],
-        content=detail["content"],
+        content=content,
         content_url=None,
         meta=_meta_to_dto(meta),
     )

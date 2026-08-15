@@ -7,6 +7,7 @@
 from app.service.asr_transcript import (
     TranscriptLine,
     apply_display_names,
+    apply_display_names_everywhere,
     build_transcript,
     format_clock,
     format_duration,
@@ -106,6 +107,30 @@ def test_apply_display_names_replaces_only_header_lines():
 def test_apply_display_names_is_noop_without_mapping():
     transcript = build_transcript([_line("说话人1", 0, 1000, "在。")], duration_ms=1000)
     assert apply_display_names(transcript, {}) == transcript
+
+
+def test_summary_names_are_replaced_anywhere_in_the_prose():
+    """纪要是散文，编号出现在句中也要换掉。"""
+    content = "会上说话人1提出改期，说话人2补充了排期口径。**负责人**：说话人1"
+    named = apply_display_names_everywhere(
+        content, {"说话人1": "张三", "说话人2": "李四"}
+    )
+
+    assert named == "会上张三提出改期，李四补充了排期口径。**负责人**：张三"
+
+
+def test_summary_names_do_not_eat_the_prefix_of_a_longer_number():
+    """「说话人1」的规则不能啃掉「说话人10」的前四个字。"""
+    content = "说话人10 汇报，说话人1 附议。"
+    named = apply_display_names_everywhere(content, {"说话人1": "张三"})
+
+    assert named == "说话人10 汇报，张三 附议。"
+
+
+def test_summary_names_keep_unnamed_labels_as_is():
+    content = "说话人3 还没被命名。"
+    assert apply_display_names_everywhere(content, {"说话人1": "张三"}) == content
+    assert apply_display_names_everywhere(content, {}) == content
 
 
 def test_local_label_starts_at_one():

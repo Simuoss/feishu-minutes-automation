@@ -42,6 +42,7 @@ from app.dto.share import (
     ShareUpdateRequest,
 )
 from app.dto.summary import SummaryDetailResponse, SummaryMetaData
+from app.service import speaker_naming_service
 from app.service.export_service import export_service
 from app.service.http_download import content_disposition
 from app.service.meeting_list_service import MeetingListService
@@ -674,11 +675,14 @@ async def share_summary(
     if detail is None:
         raise HTTPException(status_code=404, detail="该会议尚未生成纪要")
     meta = detail.get("meta") or {}
+    content = await speaker_naming_service.apply_speaker_names_to_summary(
+        detail["content"], share.minute_token, owner_user_id=owner
+    )
     # 分享页图片走访客 assets 路由：前端用相对路径时由 meeting 逻辑拼 API；
     # 这里仍返回原始 markdown，前端 resolve 到 /share/.../assets/
     return SummaryDetailResponse(
         minute_token=detail["minute_token"],
-        content=detail["content"],
+        content=content,
         content_url=None,
         meta=SummaryMetaData(
             **{k: v for k, v in meta.items() if k in SummaryMetaData.model_fields}

@@ -26,6 +26,7 @@ from app.service.meeting_storage_service import MeetingStorageService
 from app.service.transcription_service import (
     TranscriptionError,
     TranscriptionService,
+    _ChunkUtterance,
     needs_self_transcription,
     transcript_coverage,
 )
@@ -405,6 +406,121 @@ def test_transcribe_merges_speakers_across_chunks(tmp_path: Path, rig: Rig):
     # 分段音频用完即删，只留整段的那份供试听
     assert len(rig.r2.deleted) == 2
     assert all("chunk_" in key for key in rig.r2.deleted)
+
+
+@pytest.mark.usefixtures("_runtime_defaults")
+def test_finished_transcription_forces_the_summary_to_rerun(monkeypatch):
+    """转写重跑过，纪要必须跟着重跑：旧正文里的编号已经对不上新的说话人映射。"""
+    from app.data_model.entity.pipeline_job import PipelineJobEntity
+    from app.service import transcription_flow
+
+    seen: dict[str, object] = {}
+
+    async def fake_enqueue(token: str, **kwargs):
+        seen.update(kwargs)
+        seen["token"] = token
+        return 1
+
+    monkeypatch.setattr(transcription_flow, "enqueue_job", fake_enqueue)
+    job = PipelineJobEntity(
+        id=1,
+        owner_user_id=OWNER,
+        minute_token=TOKEN,
+        job_type="TRANSCRIBE",
+        mode=None,
+        status="RUNNING",
+        stage=None,
+        percent=None,
+        attempt=1,
+        max_attempts=3,
+        error_message=None,
+        started_at=None,
+        finished_at=None,
+        broker_updated_at=None,
+    )
+
+    asyncio.run(transcription_flow._enqueue_summary(job, force=True))
+    assert seen["mode"] == "FULL|force"
+
+    # 转写失败那条路只是拿飞书那几分钟兜底，不该覆盖已有纪要
+    asyncio.run(transcription_flow._enqueue_summary(job))
+    assert seen["mode"] == "FULL"
+
+
+def _speaker_candidate(cloud_id: str, centroid: list[float]) -> vp.SpeakerCandidate:
+    item = vp.SpeakerCandidate(cloud_ids=[cloud_id], samples=[], talk_ms=0, segments=0)
+    item.centroid = list(centroid)
+    return item
+
+
+def _verify(rig: Rig, tmp_path: Path, utterances: list[_ChunkUtterance]) -> int:
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"fake-audio")
+    service = TranscriptionService(
+        storage=MeetingStorageService(storage_root=str(tmp_path)),
+        asr_client=FakeAsrClient(rig.cuts),
+    )
+    candidates = [
+        _speaker_candidate("c1:speaker_0", VOICE_A),
+        _speaker_candidate("c1:speaker_1", VOICE_B),
+    ]
+    return asyncio.run(service._verify_utterances(audio, utterances, candidates))
+
+
+@pytest.mark.usefixtures("_runtime_defaults")
+def test_verify_moves_a_line_that_sounds_like_someone_else(tmp_path: Path, rig: Rig):
+    """云端把甲的话安给了乙，声纹应当把它改回来。"""
+    # 900~920 这句实际是乙说的，却被标成了甲那一组
+    stray = _ChunkUtterance(
+        text="联调今天能收尾。",
+        start_ms=900_000,
+        end_ms=920_000,
+        speaker_id="c1:speaker_0",
+        chunk_index=0,
+    )
+    good = _ChunkUtterance(
+        text="先过一下上周的进展。",
+        start_ms=0,
+        end_ms=20_000,
+        speaker_id="c1:speaker_0",
+        chunk_index=0,
+    )
+
+    assert _verify(rig, tmp_path, [good, stray]) == 1
+    assert stray.speaker_id == "c1:speaker_1"
+    # 本来就对的那句不许被动
+    assert good.speaker_id == "c1:speaker_0"
+
+
+@pytest.mark.usefixtures("_runtime_defaults")
+def test_verify_skips_lines_too_short_to_judge(tmp_path: Path, rig: Rig):
+    """一两秒的句子声纹不稳，宁可不判。"""
+    brief = _ChunkUtterance(
+        text="嗯。",
+        start_ms=900_000,
+        end_ms=901_500,
+        speaker_id="c1:speaker_0",
+        chunk_index=0,
+    )
+
+    assert _verify(rig, tmp_path, [brief]) == 0
+    assert brief.speaker_id == "c1:speaker_0"
+
+
+@pytest.mark.usefixtures("_runtime_defaults")
+def test_verify_keeps_hands_off_when_the_gap_is_small(tmp_path: Path, rig: Rig):
+    """两人质心都不像时差距不够大，保持原判。"""
+    runtime_config.replace_cache({"SPEAKER_VERIFY_MARGIN": "1.5"})
+    stray = _ChunkUtterance(
+        text="联调今天能收尾。",
+        start_ms=900_000,
+        end_ms=920_000,
+        speaker_id="c1:speaker_0",
+        chunk_index=0,
+    )
+
+    assert _verify(rig, tmp_path, [stray]) == 0
+    assert stray.speaker_id == "c1:speaker_0"
 
 
 @pytest.mark.usefixtures("_runtime_defaults", "_memory_db")

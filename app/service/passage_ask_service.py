@@ -308,7 +308,12 @@ class PassageAskService:
             text = (detail.get("content") or "").strip()
             if not text:
                 raise LookupError("纪要正文为空")
-            return text
+            # 用户划的是页面上的真名，喂给模型的上下文也得是真名，否则对不上
+            from app.service import speaker_naming_service
+
+            return await speaker_naming_service.apply_speaker_names_to_summary(
+                text, minute_token, owner_user_id=owner_user_id
+            )
         text = await self._storage.read_transcript_async(
             minute_token, owner_user_id=owner_user_id
         )

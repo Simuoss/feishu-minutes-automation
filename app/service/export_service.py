@@ -16,6 +16,19 @@ IMAGE_LINE_RE = re.compile(r"^!\[[^\]]*\]\(\s*([^)\s]+)\s*\)$")
 CAPTION_LINE_RE = re.compile(r"^图：")
 
 
+def _apply_speaker_names(
+    content: str, minute_token: str, *, owner_user_id: int
+) -> str:
+    from app.core.async_bridge import run_async
+    from app.service import speaker_naming_service
+
+    return run_async(
+        speaker_naming_service.apply_speaker_names_to_summary(
+            content, minute_token, owner_user_id=owner_user_id
+        )
+    )
+
+
 class ExportService:
     def __init__(self) -> None:
         self._storage = MeetingStorageService()
@@ -29,7 +42,10 @@ class ExportService:
         )
         if detail is None:
             raise LookupError("该会议尚未生成纪要")
-        content = detail["content"] or ""
+        # 磁盘上存的是「说话人N」，导出件跟页面看到的必须一致
+        content = _apply_speaker_names(
+            detail["content"] or "", minute_token, owner_user_id=owner_user_id
+        )
         title = (
             self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
         ).get("title") or minute_token

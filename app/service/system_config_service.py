@@ -210,6 +210,30 @@ def default_catalog() -> list[SystemConfigCreateEntity]:
             remark="太短的发言算出来的声纹不稳",
         ),
         SystemConfigCreateEntity(
+            key="SPEAKER_VERIFY_ENABLED",
+            description="逐句复核说话人归属",
+            value=_bool_str(settings.speaker_verify_enabled),
+            remark="关掉则整组沿用云端分离结果，串音的句子不会被纠正",
+        ),
+        SystemConfigCreateEntity(
+            key="SPEAKER_VERIFY_MIN_SECONDS",
+            description="参与逐句复核的最短句子时长（秒）",
+            value=str(settings.speaker_verify_min_seconds),
+            remark="太短的句子声纹不稳，复核了反而添乱",
+        ),
+        SystemConfigCreateEntity(
+            key="SPEAKER_VERIFY_MARGIN",
+            description="改判所需的相似度优势",
+            value=str(settings.speaker_verify_margin),
+            remark="比当前归属像这么多才改判；调小改判更激进",
+        ),
+        SystemConfigCreateEntity(
+            key="SPEAKER_VERIFY_CONCURRENCY",
+            description="逐句复核的并发数",
+            value=str(settings.speaker_verify_concurrency),
+            remark="每句要切片加一次推理，吃 CPU",
+        ),
+        SystemConfigCreateEntity(
             key="R2_SIGNED_URL_TTL_SECONDS",
             description="R2 签名 URL 有效期（秒）",
             value=str(settings.r2_signed_url_ttl_seconds),

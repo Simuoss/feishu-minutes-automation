@@ -1011,7 +1011,12 @@ class R2MediaService:
         meta = await self.read_meta_async(
             minute_token, owner_user_id=owner_user_id
         )
-        item = (meta.get("text") or {}).get("summary")
+        text_meta = meta.get("text") or {}
+        if text_meta.get(TRANSCRIPT_SLOT_ASR):
+            # 自建转写的会议，纪要正文里也写着「说话人N」，真名要在服务端按声纹库
+            # 替换后才能给出去；直链绕过这一步，所以这类会议只走内联正文
+            return None
+        item = text_meta.get("summary")
         if not isinstance(item, dict) or not item.get("key"):
             return None
         try:

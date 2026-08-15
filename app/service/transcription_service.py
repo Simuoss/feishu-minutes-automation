@@ -125,6 +125,19 @@ class _Turn:
         return max(0, self.end_ms - self.start_ms)
 
 
+def _recount_candidates(
+    utterances: list[_ChunkUtterance], candidates: list[vp.SpeakerCandidate]
+) -> None:
+    """复核改判之后，发言时长与段数得按新的归属重算。"""
+    by_cloud: dict[str, list[_ChunkUtterance]] = {}
+    for item in utterances:
+        by_cloud.setdefault(item.speaker_id, []).append(item)
+    for candidate in candidates:
+        items = [it for cid in candidate.cloud_ids for it in by_cloud.get(cid, [])]
+        candidate.segments = len(items)
+        candidate.talk_ms = sum(turn.duration_ms for turn in _build_turns(items))  # type: ignore[arg-type]
+
+
 def _build_turns(utterances: list[AsrUtterance]) -> list[_Turn]:
     turns: list[_Turn] = []
     for item in sorted(utterances, key=lambda u: u.start_ms):
@@ -204,8 +217,14 @@ class TranscriptionService:
         if not utterances:
             raise TranscriptionError("语音识别没有返回任何内容")
 
-        progress("识别说话人", 74.0)
+        progress("识别说话人", 70.0)
         candidates = await self._build_candidates(audio_path, utterances)
+
+        progress("复核每句话的归属", 78.0)
+        moved = await self._verify_utterances(audio_path, utterances, candidates)
+        if moved:
+            _recount_candidates(utterances, candidates)
+
         outcomes = await self._resolve_speakers(
             candidates, minute_token=minute_token, owner_user_id=owner_user_id
         )
@@ -535,8 +554,90 @@ class TranscriptionService:
 
         return vp.cluster_candidates(candidates)
 
+    async def _verify_utterances(
+        self,
+        audio_path: Path,
+        utterances: list[_ChunkUtterance],
+        candidates: list[vp.SpeakerCandidate],
+    ) -> int:
+        """逐句复核归属，把明显不像本组的句子改判给更像的那个人。
+
+        云端的说话人分离是在单次调用内部做的，两个人声音接近时会把整句安错人，
+        而声纹层只在「组」这一级取样，错的句子会一直跟着错的组走。这里给够长的
+        句子单独算一次声纹，跟各人的质心比，明显更像别人才改——改判门槛留得高，
+        宁可漏掉几句，也不要把本来对的搅乱。
+        """
+        if not runtime_config.get_bool("SPEAKER_VERIFY_ENABLED", True):
+            return 0
+        usable = [c for c in candidates if c.centroid]
+        if len(usable) < 2 or not vp.extractor.available():
+            return 0
+
+        min_seconds = max(
+            1.5,
+            runtime_config.get_float(
+                "SPEAKER_VERIFY_MIN_SECONDS", settings.speaker_verify_min_seconds
+            ),
+        )
+        margin = runtime_config.get_float(
+            "SPEAKER_VERIFY_MARGIN", settings.speaker_verify_margin
+        )
+        owner_of: dict[str, vp.SpeakerCandidate] = {
+            cloud_id: candidate
+            for candidate in candidates
+            for cloud_id in candidate.cloud_ids
+        }
+        semaphore = asyncio.Semaphore(
+            max(1, runtime_config.get_int("SPEAKER_VERIFY_CONCURRENCY", 4))
+        )
+        moved = 0
+        lock = asyncio.Lock()
+
+        async def check(index: int, item: _ChunkUtterance) -> None:
+            nonlocal moved
+            async with semaphore:
+                turn = _Turn(start_ms=item.start_ms, end_ms=item.end_ms)
+                sample = await self._embed_turn(
+                    audio_path, turn, min_seconds, tag=f"_v{index}"
+                )
+            if sample is None:
+                return
+            current = owner_of.get(item.speaker_id)
+            current_score = (
+                vp.cosine(sample.embedding, current.centroid)
+                if current and current.centroid
+                else -1.0
+            )
+            best = max(
+                usable, key=lambda c: vp.cosine(sample.embedding, c.centroid)
+            )
+            best_score = vp.cosine(sample.embedding, best.centroid)
+            if best is current or best_score - current_score < margin:
+                return
+            async with lock:
+                item.speaker_id = best.cloud_ids[0]
+                moved += 1
+
+        targets = [
+            item
+            for item in utterances
+            if item.end_ms - item.start_ms >= min_seconds * 1000
+        ]
+        if not targets:
+            return 0
+        await asyncio.gather(
+            *(check(index, item) for index, item in enumerate(targets))
+        )
+        logger.info(
+            "逐句复核完成：复核 %d 句，改判 %d 句（共 %d 句）",
+            len(targets),
+            moved,
+            len(utterances),
+        )
+        return moved
+
     async def _embed_turn(
-        self, audio_path: Path, turn: _Turn, sample_seconds: float
+        self, audio_path: Path, turn: _Turn, sample_seconds: float, tag: str = ""
     ) -> vp.SpeakerSample | None:
         """从一轮发言里切一段算声纹；开头一秒常是抢话或吸气，跳过。"""
         lead_in = 1.0 if turn.duration_ms >= (sample_seconds + 1.5) * 1000 else 0.0
@@ -544,7 +645,8 @@ class TranscriptionService:
         length = min(sample_seconds, turn.duration_ms / 1000.0 - lead_in)
         if length < 2.0:
             return None
-        clip = audio_path.with_name(f"sample_{turn.start_ms}.wav")
+        # 并发切片时文件名必须互不相同，跨段偶尔会有起点相同的两句
+        clip = audio_path.with_name(f"sample_{turn.start_ms}{tag}.wav")
         try:
             produced = await ffmpeg_client.extract_audio_clip(
                 audio_path, start, length, clip

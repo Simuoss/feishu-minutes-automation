@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     # 样本要从足够长的发言里取，太短的片段算出来的声纹不稳
     speaker_min_segment_seconds: float = 12.0
 
+    # 逐句复核：云端在一次调用内也会把声音接近的人标混，用声纹把明显错的改回来
+    speaker_verify_enabled: bool = True
+    speaker_verify_min_seconds: float = 3.0
+    # 比当前归属像这么多才改判，门槛高一点，宁可漏判也别把对的搅乱
+    speaker_verify_margin: float = 0.12
+    speaker_verify_concurrency: int = 4
+
     r2_signed_url_ttl_seconds: int = 7200
     r2_video_crf: int = 32
     r2_video_max_height: int = 720

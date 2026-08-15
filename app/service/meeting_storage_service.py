@@ -250,13 +250,14 @@ class MeetingStorageService:
         )
 
     async def read_transcript_async(
-        self, minute_token: str, *, owner_user_id: int
+        self, minute_token: str, *, owner_user_id: int, apply_names: bool = True
     ) -> str | None:
+        """读转写。默认贴上真名；写纪要时要原始编号，传 apply_names=False。"""
         text = await self._read_transcript_raw(
             minute_token, owner_user_id=owner_user_id
         )
-        if text is None:
-            return None
+        if text is None or not apply_names:
+            return text
         from app.service.speaker_naming_service import apply_speaker_names
 
         # 盘上写的是「说话人N」，真名在这里按声纹库贴上去，改名才能立刻全站生效

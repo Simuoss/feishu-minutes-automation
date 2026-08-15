@@ -148,8 +148,10 @@ class SummaryGenerationService:
                     mode=run_mode,
                 )
 
+        # 故意读未换名的版本：纪要正文里留着「说话人N」，展示时再按声纹库贴真名。
+        # 若这里喂真名进去，名字就被写死在正文里，以后改名只能重跑纪要才跟得上。
         transcript = await self._storage.read_transcript_async(
-            minute_token, owner_user_id=owner_user_id
+            minute_token, owner_user_id=owner_user_id, apply_names=False
         )
         if not transcript or not transcript.strip():
             message = "本地没有转写文本，请先下载该会议的转写记录"
