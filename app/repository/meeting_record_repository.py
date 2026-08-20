@@ -108,6 +108,18 @@ class MeetingRecordRepository:
         await self._session.refresh(orm)
         return _to_entity(orm)
 
+    async def clear_transcript_source(self, record_id: int) -> None:
+        """把转写来源置空。
+
+        update 会跳过 None（不然每个没填的字段都会把库里的值抹掉），所以「置空」
+        这件事必须有自己的入口。
+        """
+        orm = await self._session.get(MeetingRecordORM, record_id)
+        if orm is None:
+            return
+        orm.transcript_source = None
+        await self._session.flush()
+
     async def delete_by_ids(self, ids: list[int]) -> int:
         if not ids:
             return 0

@@ -21,6 +21,8 @@ from app.service.transcript_anchor import extract_unique_speakers
 logger = logging.getLogger(__name__)
 
 MANUAL_EVENT_TYPE = "MANUAL_DOWNLOAD"
+# 本地导入的会议：飞书上没有对应妙记，一切飞书专属操作都要先拦住
+LOCAL_IMPORT_EVENT_TYPE = "LOCAL_IMPORT"
 
 
 @dataclass
@@ -50,7 +52,8 @@ class MeetingDownloadService:
         return self._minutes or FeishuMinutesClient(user_id=user_id)
 
     @staticmethod
-    async def _enqueue_followups(minute_token: str, *, owner_user_id: int) -> None:
+    async def enqueue_followups(minute_token: str, *, owner_user_id: int) -> None:
+        """下载或本地导入收尾后，按这场会议实际有什么来排后续作业。"""
         from app.service.pipeline_queue import (
             JOB_SHARE_VIDEO,
             JOB_SUMMARY,
@@ -60,9 +63,15 @@ class MeetingDownloadService:
         from app.service.transcription_flow import (
             enqueue_transcribe,
             evaluate_transcript_coverage,
+            has_media_for_asr,
         )
 
-        if r2_media_service.enabled():
+        storage = MeetingStorageService()
+        has_video = (
+            storage.find_video_path(minute_token, owner_user_id=owner_user_id)
+            is not None
+        )
+        if r2_media_service.enabled() and has_video:
             await enqueue_job(
                 minute_token,
                 owner_user_id=owner_user_id,
@@ -72,7 +81,9 @@ class MeetingDownloadService:
         _coverage, needs_asr = await evaluate_transcript_coverage(
             minute_token, owner_user_id=owner_user_id
         )
-        if needs_asr:
+        if needs_asr and has_media_for_asr(
+            minute_token, owner_user_id=owner_user_id
+        ):
             # 纪要要读完整转写，所以这里只排转写；转写作业跑完自己会放纪要进队
             await enqueue_transcribe(minute_token, owner_user_id=owner_user_id)
             logger.info(
@@ -149,7 +160,7 @@ class MeetingDownloadService:
                 download_progress_store.complete(
                     minute_token, owner_user_id=owner_id
                 )
-                await self._enqueue_followups(
+                await self.enqueue_followups(
                     minute_token, owner_user_id=owner_id
                 )
                 return DownloadResult(
@@ -307,7 +318,7 @@ class MeetingDownloadService:
                     finished=True,
                 )
                 # 下载完成后即可压缩上云供播放；原片仍保留，待纪要完成后 finalize 再删
-                await self._enqueue_followups(
+                await self.enqueue_followups(
                     minute_token, owner_user_id=owner_id
                 )
                 return DownloadResult(

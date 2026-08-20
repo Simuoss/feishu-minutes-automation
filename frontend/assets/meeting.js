@@ -1037,6 +1037,90 @@ async function maybeFollowSummaryStream(token) {
   }
 }
 
+const TRANSCRIPT_SOURCE_TEXT = {
+  feishu: "飞书自带转写",
+  asr: "自建转写",
+  import: "导入的文本",
+};
+
+/** 转写来源条：显示现在读的是哪份，并给出可切换的方向。 */
+async function loadTranscriptSource(minuteToken) {
+  const bar = $("#transcript-source-bar");
+  if (!bar) return;
+  bar.classList.add("hidden");
+  try {
+    const res = await apiFetch(
+      withOwnerQuery(`/meetings/${minuteToken}/transcript/source`)
+    );
+    if (!res.ok) return;
+    renderTranscriptSource(await res.json());
+  } catch {
+    /* 来源条是附加信息，失败不影响看转写 */
+  }
+}
+
+function renderTranscriptSource(data) {
+  const bar = $("#transcript-source-bar");
+  if (!bar || !data) return;
+  detailState.transcriptSource = data.source;
+  $("#transcript-source-name").textContent =
+    TRANSCRIPT_SOURCE_TEXT[data.source] || data.source;
+
+  const hint = $("#transcript-source-hint");
+  if (data.source === "feishu" && typeof data.coverage === "number") {
+    hint.textContent = `覆盖录音 ${Math.round(data.coverage * 100)}%`;
+  } else if (data.source === "import") {
+    hint.textContent = "随文件一起导入，没有对应音频";
+  } else {
+    hint.textContent = "";
+  }
+
+  $("#switch-to-asr-btn").classList.toggle("hidden", !data.can_switch_to_asr);
+  $("#switch-to-feishu-btn").classList.toggle(
+    "hidden",
+    !data.can_switch_to_feishu
+  );
+  bar.classList.remove("hidden");
+}
+
+const SWITCH_CONFIRM = {
+  asr:
+    "改用自建转写会重新识别整段录音，并在完成后重新生成纪要。" +
+    "识别按量计费，长课可能要跑很久。确定继续？",
+  feishu:
+    "改回飞书自带转写会删掉自建那份转写，并重新生成纪要。" +
+    "这场会议的说话人声纹映射也会一起清掉。确定继续？",
+};
+
+async function switchTranscriptSource(source) {
+  const token = detailState.token;
+  if (!token || !window.confirm(SWITCH_CONFIRM[source])) return;
+  const buttons = [$("#switch-to-asr-btn"), $("#switch-to-feishu-btn")];
+  buttons.forEach((btn) => btn && (btn.disabled = true));
+  const hint = $("#transcript-source-hint");
+  hint.textContent = "正在提交…";
+  try {
+    const res = await apiFetch(
+      withOwnerQuery(`/meetings/${token}/transcript/source`),
+      { method: "POST", body: JSON.stringify({ source }) }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        typeof data.detail === "string" ? data.detail : res.statusText
+      );
+    }
+    renderTranscriptSource(data);
+    hint.textContent = data.message || "已提交";
+    if (source === "asr") followTranscribeProgress(token);
+    else openSummaryStream(token);
+  } catch (e) {
+    hint.textContent = `切换失败：${e.message || e}`;
+  } finally {
+    buttons.forEach((btn) => btn && (btn.disabled = false));
+  }
+}
+
 /**
  * 说话人命名面板：只对超管出现。
  * 人物库是全站共享的，普通管理员只看得到已命名的结果。
@@ -1107,6 +1191,7 @@ async function openDetail(minuteToken) {
   $("#media-section").classList.add("hidden");
   $("#media-players").innerHTML = "";
   $("#transcript-section").classList.add("hidden");
+  $("#transcript-source-bar")?.classList.add("hidden");
   $("#transcript-scroll").innerHTML = "";
   $("#detail-tabs").classList.add("hidden");
   $("#summary-pane").classList.add("hidden");
@@ -1158,6 +1243,7 @@ async function openDetail(minuteToken) {
       loadMetrics(minuteToken),
       loadRedactionAudit(minuteToken),
       loadMeetingSpeakers(minuteToken),
+      hasTranscript ? loadTranscriptSource(minuteToken) : Promise.resolve(),
     ]);
 
     const [mediaElement, hasSummary, transcriptText] = await Promise.all([
@@ -1201,6 +1287,12 @@ $("#speaker-panel-list")?.addEventListener("click", (e) => {
   const row = btn?.closest(".speaker-row");
   if (row) saveSpeakerName(row);
 });
+$("#switch-to-asr-btn")?.addEventListener("click", () =>
+  switchTranscriptSource("asr")
+);
+$("#switch-to-feishu-btn")?.addEventListener("click", () =>
+  switchTranscriptSource("feishu")
+);
 $("#scroll-mode-btn").addEventListener("click", toggleScrollMode);
 $("#generate-summary-btn").addEventListener("click", generateSummary);
 $("#refresh-redaction-btn")?.addEventListener("click", () => {

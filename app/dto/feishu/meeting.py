@@ -1,3 +1,4 @@
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -96,3 +97,18 @@ class LocalMeetingDetailResponse(BaseModel):
 class LocalTranscriptResponse(BaseModel):
     minute_token: str
     transcript: str = ""
+
+
+class TranscriptSourceResponse(BaseModel):
+    minute_token: str
+    source: str
+    # 覆盖率只对飞书那份有意义，自建转写与本地导入都为空
+    coverage: float | None = None
+    can_switch_to_asr: bool = False
+    can_switch_to_feishu: bool = False
+    job_id: int | None = None
+    message: str | None = None
+
+
+class SwitchTranscriptSourceRequest(BaseModel):
+    source: Literal["asr", "feishu"]

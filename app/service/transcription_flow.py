@@ -37,11 +37,49 @@ logger = logging.getLogger(__name__)
 
 SOURCE_FEISHU = "feishu"
 SOURCE_ASR = "asr"
+# 本地导入带进来的转写：既不是飞书导出的，也不是自建识别的
+SOURCE_IMPORT = "import"
 
 # 发言少于这个时长的说话人不进参会人列表，多半是分离出来的碎片
 MIN_PARTICIPANT_TALK_MS = 5_000
 
 _storage = MeetingStorageService()
+
+
+def has_media_for_asr(minute_token: str, *, owner_user_id: int) -> bool:
+    """本地有没有可转写的媒体。自动流程用这个便宜的判断，不擅自触发下载。"""
+    return (
+        _storage.find_media_path(minute_token, owner_user_id=owner_user_id)
+        is not None
+    )
+
+
+async def can_self_transcribe(minute_token: str, *, owner_user_id: int) -> bool:
+    """这场会议究竟有没有办法拿到音频。
+
+    比 has_media_for_asr 宽：原片被清理过的飞书会议还能重下一份，只有本地导入的
+    纯文本会议是真的无路可走。手动切换走这个判断。
+    """
+    from app.integrations.r2_client import r2_client
+    from app.service.meeting_download_service import LOCAL_IMPORT_EVENT_TYPE
+    from app.service.r2_media_service import r2_media_service
+
+    if has_media_for_asr(minute_token, owner_user_id=owner_user_id):
+        return True
+    if r2_media_service.enabled():
+        key = r2_media_service.asr_audio_key(
+            minute_token, owner_user_id=owner_user_id
+        )
+        if await r2_client.exists(key):
+            return True
+    async with UnitOfWork() as uow:
+        assert uow.meeting_records is not None
+        record = await uow.meeting_records.get_latest_by_minute_token(
+            minute_token, owner_user_id=owner_user_id
+        )
+    return record is not None and (
+        record.event_type or ""
+    ) != LOCAL_IMPORT_EVENT_TYPE
 
 
 async def evaluate_transcript_coverage(
@@ -54,8 +92,9 @@ async def evaluate_transcript_coverage(
             minute_token, owner_user_id=owner_user_id
         )
     duration_ms = record.duration_ms if record else None
-    if record and record.transcript_source == SOURCE_ASR:
-        # 已经是自建转写了，不再重复判定
+    if record and record.transcript_source and record.transcript_source != SOURCE_FEISHU:
+        # 覆盖率这套口径只对飞书导出的转写成立。自建转写已经覆盖全程；本地导入的
+        # 纯文本没有段首时间戳，硬算会得出 0 并误判成「被截断」。
         return record.transcript_coverage, False
 
     text = await _storage.read_transcript_async(
@@ -69,6 +108,14 @@ async def evaluate_transcript_coverage(
         )
         return None, False
     decision = needs_self_transcription(coverage)
+    if decision and not has_media_for_asr(minute_token, owner_user_id=owner_user_id):
+        # 纯文本会议、或只下了转写没下媒体的会议：硬排转写只会攒一条失败作业
+        logger.info(
+            "转写覆盖率只有 %.2f，但本地没有音视频，无法自建转写，沿用现有转写 token=%s",
+            coverage,
+            minute_token,
+        )
+        decision = False
     logger.info(
         "转写覆盖率 token=%s coverage=%.2f 时长=%.0fs 判定=%s",
         minute_token,
@@ -222,6 +269,9 @@ async def _enqueue_summary(job: PipelineJobEntity, *, force: bool = False) -> No
 
 
 async def enqueue_transcribe(minute_token: str, *, owner_user_id: int) -> int | None:
+    """入队自建转写。手动切换与批量补跑都走这里，闸门也就放在这里。"""
+    if not await can_self_transcribe(minute_token, owner_user_id=owner_user_id):
+        raise TranscriptionError("这场会议没有可用的音频，无法自建转写")
     return await enqueue_job(
         minute_token,
         owner_user_id=owner_user_id,

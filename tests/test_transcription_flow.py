@@ -19,6 +19,7 @@ from app.integrations.asr.step_asr_client import (
     AsrUtterance,
 )
 from app.repository.uow import UnitOfWork
+from app.service import audio_source_service
 from app.service import speaker_naming_service
 from app.service import voiceprint_service as vp
 from app.service.asr_transcript import TranscriptLine, build_transcript
@@ -282,6 +283,12 @@ class FakeR2:
     async def presign_asr_audio_key(self, key: str) -> str:
         return f"https://r2.example/{key}"
 
+    async def asr_audio_exists(self, key: str) -> bool:
+        return False
+
+    async def download_asr_audio(self, key: str, dest):
+        raise AssertionError("有本地原片时不该回 R2 拉音轨")
+
     async def delete_asr_audio(self, key: str) -> None:
         self.deleted.append(key)
 
@@ -344,6 +351,7 @@ def rig(monkeypatch: pytest.MonkeyPatch) -> Rig:
     monkeypatch.setattr("app.service.r2_media_service.r2_media_service", item.r2)
     monkeypatch.setattr("app.integrations.video.ffmpeg_client.ffmpeg_client", ffmpeg)
     monkeypatch.setattr("app.service.transcription_service.ffmpeg_client", ffmpeg)
+    monkeypatch.setattr("app.service.audio_source_service.ffmpeg_client", ffmpeg)
     monkeypatch.setattr(vp, "extractor", FakeExtractor())
     return item
 
@@ -641,9 +649,43 @@ def test_unrecoverable_stretch_is_skipped_with_the_rest_kept(
 
 
 @pytest.mark.usefixtures("_runtime_defaults", "_memory_db")
-def test_transcribe_fails_when_media_missing(tmp_path: Path, rig: Rig):
+def test_transcribe_reuses_cloud_audio_when_media_gone(
+    tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+):
+    """原片被清理后，音轨还在云上就该拉回来接着转，而不是回飞书重下。"""
     storage = MeetingStorageService(storage_root=str(tmp_path))
     storage.ensure_layout(TOKEN, owner_user_id=OWNER)
+
+    class CloudHasAudio(FakeR2):
+        async def asr_audio_exists(self, key: str) -> bool:
+            return True
+
+        async def download_asr_audio(self, key: str, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"audio")
+            return dest
+
+    monkeypatch.setattr(
+        "app.service.r2_media_service.r2_media_service", CloudHasAudio()
+    )
+
+    result = _run_transcribe(storage, TOKEN, FakeAsrClient(rig.cuts))
+
+    assert result.utterances > 0
+
+
+@pytest.mark.usefixtures("_runtime_defaults", "_memory_db")
+def test_transcribe_fails_when_media_and_cloud_audio_both_gone(
+    tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+):
+    """本地云上都没音轨，回飞书也重下不到，就得明确报错而不是产出空转写。"""
+    storage = MeetingStorageService(storage_root=str(tmp_path))
+    storage.ensure_layout(TOKEN, owner_user_id=OWNER)
+
+    async def refuse(*args, **kwargs):
+        raise audio_source_service.AudioSourceError("本地没有音视频，也重下不到")
+
+    monkeypatch.setattr(audio_source_service, "_refetch_media", refuse)
 
     with pytest.raises(TranscriptionError, match="音视频"):
         _run_transcribe(storage, TOKEN, FakeAsrClient(rig.cuts))

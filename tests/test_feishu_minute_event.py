@@ -262,7 +262,7 @@ def test_download_retries_when_minute_not_ready(monkeypatch: Any) -> None:
     async def fake_enqueue(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(service, "_enqueue_followups", fake_enqueue)
+    monkeypatch.setattr(service, "enqueue_followups", fake_enqueue)
     _patch_download_uow(monkeypatch, service)
 
     result = asyncio.run(

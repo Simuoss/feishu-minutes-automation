@@ -199,6 +199,21 @@ class PipelineWorker:
                 finished=True,
             )
             return
+        # 纯音频会议本来就没有视频可压，这不是失败，别在列表里挂一条红的
+        if not r2_media_service.has_local_video(
+            job.minute_token, owner_user_id=job.owner_user_id
+        ):
+            logger.info(
+                "会议没有视频，分享片作业按跳过收尾 token=%s", job.minute_token
+            )
+            await update_job(
+                job.id,
+                status=STATUS_COMPLETED,
+                stage="SKIPPED_NO_VIDEO",
+                percent=100.0,
+                finished=True,
+            )
+            return
         await update_job(
             job.id,
             status=STATUS_FAILED,

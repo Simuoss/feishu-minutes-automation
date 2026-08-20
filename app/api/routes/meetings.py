@@ -18,10 +18,17 @@ from app.dto.feishu.meeting import (
     LocalMediaFileResponse,
     LocalMeetingDetailResponse,
     LocalTranscriptResponse,
+    SwitchTranscriptSourceRequest,
+    TranscriptSourceResponse,
 )
 from app.integrations.feishu.user_auth import UserAuthRequiredError
+from app.repository.uow import UnitOfWork
+from app.service import transcript_switch_service
 from app.service.download_progress_store import download_progress_store
-from app.service.meeting_download_service import MeetingDownloadService
+from app.service.meeting_download_service import (
+    LOCAL_IMPORT_EVENT_TYPE,
+    MeetingDownloadService,
+)
 from app.service.meeting_list_service import MeetingListService
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.ownership import (
@@ -30,6 +37,8 @@ from app.service.ownership import (
     resolve_resource_owner,
 )
 from app.service.r2_media_service import r2_media_service
+from app.service.transcript_switch_service import TranscriptSwitchError
+from app.service.transcription_service import TranscriptionError
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +325,94 @@ async def get_local_transcript(
     if text is None:
         raise HTTPException(status_code=404, detail="本地没有该会议的转写文本")
     return LocalTranscriptResponse(minute_token=minute_token, transcript=text)
+
+
+@router.get(
+    "/{minute_token}/transcript/source",
+    response_model=TranscriptSourceResponse,
+)
+async def get_transcript_source(
+    minute_token: str,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> TranscriptSourceResponse:
+    """当前转写来源，以及两个方向分别能不能切。"""
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    return await _describe_transcript_source(minute_token, owner_user_id=owner)
+
+
+@router.post(
+    "/{minute_token}/transcript/source",
+    response_model=TranscriptSourceResponse,
+)
+async def switch_transcript_source(
+    minute_token: str,
+    payload: SwitchTranscriptSourceRequest,
+    request: Request,
+    owner_user_id: int | None = None,
+) -> TranscriptSourceResponse:
+    """手动切换转写来源并重跑。切完纪要会自动重生成。"""
+    require_user_id(request)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    try:
+        if payload.source == "asr":
+            result = await transcript_switch_service.switch_to_asr(
+                minute_token, owner_user_id=owner
+            )
+        else:
+            result = await transcript_switch_service.switch_to_feishu(
+                minute_token, owner_user_id=owner
+            )
+    except (TranscriptSwitchError, TranscriptionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    described = await _describe_transcript_source(
+        minute_token, owner_user_id=owner
+    )
+    described.job_id = result.job_id
+    described.message = result.message
+    return described
+
+
+async def _describe_transcript_source(
+    minute_token: str, *, owner_user_id: int
+) -> TranscriptSourceResponse:
+    from app.service.transcription_flow import (
+        SOURCE_FEISHU,
+        SOURCE_IMPORT,
+        can_self_transcribe,
+    )
+
+    async with UnitOfWork() as uow:
+        assert uow.meeting_records is not None
+        record = await uow.meeting_records.get_latest_by_minute_token(
+            minute_token, owner_user_id=owner_user_id
+        )
+    source = transcript_switch_service.resolve_current_source(
+        record, minute_token, owner_user_id=owner_user_id
+    )
+    is_import = record is not None and (
+        record.event_type or ""
+    ) == LOCAL_IMPORT_EVENT_TYPE
+    return TranscriptSourceResponse(
+        minute_token=minute_token,
+        source=source,
+        coverage=record.transcript_coverage if record else None,
+        can_switch_to_asr=(
+            source != "asr"
+            and r2_media_service.enabled()
+            and await can_self_transcribe(
+                minute_token, owner_user_id=owner_user_id
+            )
+        ),
+        can_switch_to_feishu=(
+            source != SOURCE_FEISHU and source != SOURCE_IMPORT and not is_import
+        ),
+    )
 
 
 @router.get("/local/{minute_token}/media/{filename}")

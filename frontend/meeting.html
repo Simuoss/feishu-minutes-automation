@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260815-voiceprints" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260820-import-switch" />
 </head>
 <body class="admin-body" data-admin-page="meeting">
   <div id="app" class="admin-shell">
@@ -75,6 +75,13 @@
           <button id="scroll-mode-btn" class="btn btn-sm" type="button"><i class="ri ri-focus-3-line" aria-hidden="true"></i><span class="btn-label">跟随模式</span></button>
           <span id="sync-hint" class="sync-hint">播放或拖动进度条时，转写自动滚动到对应位置</span>
         </div>
+        <div id="transcript-source-bar" class="transcript-source-bar hidden">
+          <span class="transcript-source-label">转写来源</span>
+          <span id="transcript-source-name" class="transcript-source-name"></span>
+          <span id="transcript-source-hint" class="transcript-source-hint"></span>
+          <button id="switch-to-asr-btn" class="btn btn-sm hidden" type="button"><i class="ri ri-mic-line" aria-hidden="true"></i><span class="btn-label">改用自建转写</span></button>
+          <button id="switch-to-feishu-btn" class="btn btn-sm hidden" type="button"><i class="ri ri-cloud-line" aria-hidden="true"></i><span class="btn-label">改回飞书转写</span></button>
+        </div>
         <div id="transcript-section" class="transcript-section hidden">
           <div class="transcript-header">
             <h3>转写文本</h3>
@@ -140,6 +147,6 @@
   <script defer src="/assets/vendor/purify.min.js"></script>
   <script defer src="/assets/safe-markdown.js?v=20260806-safe-md2"></script>
   <script defer src="/assets/passage-ask.js?v=20260806-passage-ask4"></script>
-  <script defer src="/assets/meeting.js?v=20260816-no-r2-text"></script>
+  <script defer src="/assets/meeting.js?v=20260820-import-switch"></script>
 </body>
 </html>

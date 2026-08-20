@@ -30,6 +30,11 @@ from app.integrations.video.ffmpeg_client import FfmpegError, ffmpeg_client
 from app.repository.uow import UnitOfWork
 from app.service import voiceprint_service as vp
 from app.service.asr_transcript import TranscriptLine, build_transcript, local_label
+from app.service.audio_source_service import (
+    AudioSourceError,
+    cleanup_refetched_media,
+    ensure_asr_audio,
+)
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.transcript_anchor import parse_transcript_segments
 
@@ -177,34 +182,25 @@ class TranscriptionService:
                 "自建转写需要把音频放到公网直链上，当前未启用 R2 存储"
             )
 
-        media = self._storage.find_media_path(
-            minute_token, owner_user_id=owner_user_id
-        )
-        if media is None:
-            raise TranscriptionError("本地没有该会议的音视频文件，无法转写")
-
-        work_dir = self._storage.get_asr_work_dir(
-            minute_token, owner_user_id=owner_user_id
-        )
-        audio_path = work_dir / "audio.mp3"
-
-        progress("抽取音轨", 8.0)
+        progress("准备音轨", 8.0)
         try:
-            await ffmpeg_client.extract_audio(media, audio_path)
-            info = await ffmpeg_client.probe(media)
+            audio = await ensure_asr_audio(
+                minute_token,
+                owner_user_id=owner_user_id,
+                storage=self._storage,
+            )
+        except AudioSourceError as exc:
+            raise TranscriptionError(str(exc)) from exc
+        audio_path = audio.local_path
+        audio_key = audio.key
+
+        try:
+            info = await ffmpeg_client.probe(audio_path)
         except FfmpegError as exc:
-            raise TranscriptionError(f"抽取音轨失败：{exc}") from exc
+            raise TranscriptionError(f"探测音轨失败：{exc}") from exc
         total_seconds = info.duration_seconds or (float(duration_ms or 0) / 1000.0)
         if total_seconds <= 0:
             raise TranscriptionError("无法确定录音时长，放弃自建转写")
-
-        progress("上传音频", 14.0)
-        audio_key = r2_media_service.asr_audio_key(
-            minute_token, owner_user_id=owner_user_id
-        )
-        await r2_media_service.upload_asr_audio(
-            audio_path, audio_key, minute_token=minute_token
-        )
 
         utterances, skipped_seconds = await self._transcribe_chunks(
             audio_path,
@@ -256,6 +252,9 @@ class TranscriptionService:
             owner_user_id=owner_user_id,
         )
         audio_path.unlink(missing_ok=True)
+        cleanup_refetched_media(
+            audio, minute_token, owner_user_id=owner_user_id
+        )
 
         progress("转写完成", 98.0)
         return TranscriptionResult(

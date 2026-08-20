@@ -23,7 +23,10 @@ from app.service.figure_audit import (
     manifest_to_figures,
 )
 from app.service.figure_redaction import FigureRedactionService, RedactionOutcome
-from app.service.meeting_storage_service import MeetingStorageService
+from app.service.meeting_storage_service import (
+    AUDIO_EXTENSIONS,
+    MeetingStorageService,
+)
 from app.service.r2_media_service import r2_media_service
 from app.service.scene_detection import (
     SceneDecision,
@@ -383,6 +386,13 @@ class SummaryGenerationService:
             "figure_abandoned": outcome.abandoned,
         }
 
+    def _is_audio_only(self, minute_token: str, *, owner_user_id: int) -> bool:
+        """本地媒体只有音频。用来在碰 R2 之前就判掉配图。"""
+        media = self._storage.find_media_path(
+            minute_token, owner_user_id=owner_user_id
+        )
+        return media is not None and media.suffix.lower() in AUDIO_EXTENSIONS
+
     async def _prepare_figures(
         self,
         minute_token: str,
@@ -399,6 +409,14 @@ class SummaryGenerationService:
         video_path = self._storage.find_video_path(
             minute_token, owner_user_id=owner_user_id
         )
+        if video_path is None and self._is_audio_only(
+            minute_token, owner_user_id=owner_user_id
+        ):
+            # 纯音频会议不必去 R2 兜一圈，那上面也不会有分享片
+            logger.info(
+                "会议 %s 只有音频，按纯文字纪要生成", minute_token
+            )
+            return []
         if video_path is None:
             video_path = await r2_media_service.ensure_local_video(
                 minute_token, owner_user_id=owner_user_id

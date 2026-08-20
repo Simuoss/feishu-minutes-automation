@@ -64,6 +64,12 @@ class R2MediaService:
     async def presign_asr_audio_key(self, key: str) -> str:
         return await r2_client.presign_get(key)
 
+    async def asr_audio_exists(self, key: str) -> bool:
+        return await r2_client.exists(key)
+
+    async def download_asr_audio(self, key: str, dest: Path) -> Path:
+        return await r2_client.download_file(key, dest)
+
     async def delete_asr_audio(self, key: str) -> None:
         await r2_client.delete_object(key)
 
@@ -215,6 +221,14 @@ class R2MediaService:
             self.write_meta_async(
                 minute_token, meta, owner_user_id=owner_user_id
             )
+        )
+
+    def has_local_video(self, minute_token: str, *, owner_user_id: int) -> bool:
+        return (
+            self._storage.find_video_path(
+                minute_token, owner_user_id=owner_user_id
+            )
+            is not None
         )
 
     def video_ready(self, minute_token: str, *, owner_user_id: int) -> bool:
