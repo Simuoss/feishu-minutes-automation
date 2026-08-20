@@ -39,6 +39,20 @@ def test_cors_rules_reject_missing_get():
     )
 
 
+def test_cors_rules_can_be_asked_about_put():
+    """本地导入是浏览器直传，只放开 GET 的桶会把 PUT 拦在预检那一步。"""
+    read_only = [{"AllowedOrigins": ["*"], "AllowedMethods": ["GET", "HEAD"]}]
+    origins = ["https://larkmeeting.simuoss.cn"]
+
+    assert cors_rules_cover_origins(read_only, origins)
+    assert not cors_rules_cover_origins(read_only, origins, method="PUT")
+    assert cors_rules_cover_origins(
+        [{"AllowedOrigins": ["*"], "AllowedMethods": ["GET", "HEAD", "PUT"]}],
+        origins,
+        method="PUT",
+    )
+
+
 def test_is_access_denied():
     assert _is_access_denied(_Denied("AccessDenied"))
     assert not _is_access_denied(_Denied("NoSuchCORSConfiguration"))

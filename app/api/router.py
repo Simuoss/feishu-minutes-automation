@@ -9,6 +9,7 @@ from app.api.routes import (
     auth_admin,
     exports,
     feishu,
+    imports,
     meetings,
     passage_ask,
     shares,
@@ -24,6 +25,7 @@ api_router.include_router(admin_users.router)
 api_router.include_router(admin_system_configs.router)
 api_router.include_router(admin_voiceprints.router)
 api_router.include_router(shares.guest_router)
+api_router.include_router(imports.router)
 # meetings 在前：/meetings/local/{token} 需先于 /meetings/{token}/summary 参与匹配
 api_router.include_router(meetings.router)
 api_router.include_router(shares.admin_router)

@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260806-share-ux" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260820-import-switch" />
 </head>
 <body class="admin-body" data-admin-page="meetings">
   <div id="app" class="admin-shell">
@@ -95,6 +95,7 @@
           <button id="batch-summary-btn" class="btn" type="button" disabled><i class="ri ri-article-line" aria-hidden="true"></i><span class="btn-label">生成纪要</span></button>
           <button id="catchup-summary-btn" class="btn" type="button" disabled><i class="ri ri-restart-line" aria-hidden="true"></i><span class="btn-label">补跑未生成</span></button>
           <button id="share-selected-btn" class="btn" type="button" disabled><i class="ri ri-share-forward-line" aria-hidden="true"></i><span class="btn-label">分享选中</span></button>
+          <button id="import-btn" class="btn" type="button"><i class="ri ri-upload-2-line" aria-hidden="true"></i><span class="btn-label">导入本地文件</span></button>
         </div>
         <div class="actions-right">
           <label class="field field-inline">
@@ -124,6 +125,34 @@
         <button id="next-page" class="btn" type="button" disabled><span class="btn-label">下一页</span><i class="ri ri-arrow-right-s-line" aria-hidden="true"></i></button>
       </div>
     </main>
+    </div>
+  </div>
+
+  <div id="import-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="import-title" class="modal-title">导入本地文件</h3>
+      <p class="modal-hint">
+        音视频会走自建转写再生成纪要；文档直接当成转写正文生成纪要。
+        支持 mp4/mov/mkv/webm、mp3/m4a/wav/aac/ogg、txt/md/srt/docx/pdf。
+      </p>
+      <label class="field">
+        <span>文件</span>
+        <input id="import-file" type="file"
+          accept=".mp4,.mov,.mkv,.webm,.mp3,.m4a,.wav,.aac,.ogg,.txt,.md,.srt,.docx,.pdf" />
+      </label>
+      <label class="field">
+        <span>标题（留空则用文件名）</span>
+        <input id="import-title-input" type="text" maxlength="200" placeholder="例如：2026 秋 算法课 第三讲" />
+      </label>
+      <div id="import-progress" class="item-progress hidden">
+        <div class="item-progress-bar"><div id="import-progress-fill" class="item-progress-fill" style="width:0%"></div></div>
+        <p id="import-progress-label" class="item-progress-label"></p>
+      </div>
+      <div class="modal-actions">
+        <button id="import-confirm" class="btn btn-primary" type="button"><i class="ri ri-upload-2-line" aria-hidden="true"></i><span class="btn-label">开始导入</span></button>
+        <button id="import-cancel" class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
     </div>
   </div>
 
@@ -211,6 +240,6 @@
   <script defer src="/assets/common.js?v=20260816-no-r2-text"></script>
   <script defer src="/assets/admin-shell.js?v=20260815-voiceprints"></script>
   <script defer src="/assets/vendor/qrcode.min.js"></script>
-  <script defer src="/assets/list.js?v=20260806-llm-pool-hint"></script>
+  <script defer src="/assets/list.js?v=20260820-import-fallback"></script>
 </body>
 </html>

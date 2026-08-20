@@ -944,6 +944,8 @@ async function refreshFromCloud() {
     } else {
       // 普通用户：page_token 必须串行；每页回来就渐进渲染，缩短首屏空白
       const byToken = new Map();
+      // 本地导入的会议只在入库列表里，云端列表看不见它们，得并一份进来
+      const storedP = fetchStoredList().catch(() => ({ items: [] }));
       let pageToken = null;
       let guard = 0;
       let firstPaint = true;
@@ -972,6 +974,11 @@ async function refreshFromCloud() {
           { thinking: true }
         );
       } while (pageToken && guard < 200);
+      for (const item of (await storedP).items || []) {
+        if (item?.minute_token && !byToken.has(item.minute_token)) {
+          byToken.set(item.minute_token, item);
+        }
+      }
       collected = [...byToken.values()];
     }
 
@@ -998,6 +1005,158 @@ async function refreshFromCloud() {
   } finally {
     state.syncing = false;
     if (state.allItems.length) applyLocalView();
+  }
+}
+
+/* —— 本地导入 —— */
+
+// 小文件走服务器直传更省一次往返；大文件必须直传 R2，否则隧道扛不住
+const IMPORT_DIRECT_LIMIT = 8 * 1024 * 1024;
+
+function setImportProgress(percent, label) {
+  const box = $("#import-progress");
+  if (!box) return;
+  box.classList.remove("hidden");
+  $("#import-progress-fill").style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  $("#import-progress-label").textContent = label;
+}
+
+function closeImportDialog() {
+  $("#import-dialog")?.classList.add("hidden");
+}
+
+function openImportDialog() {
+  const dialog = $("#import-dialog");
+  if (!dialog) return;
+  $("#import-file").value = "";
+  $("#import-title-input").value = "";
+  $("#import-progress")?.classList.add("hidden");
+  $("#import-progress-label").textContent = "";
+  $("#import-confirm").disabled = false;
+  dialog.classList.remove("hidden");
+}
+
+/** fetch 没有上传进度事件，几百兆的文件必须靠 XHR 才能给出进度条。 */
+function putWithProgress(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let sentBytes = 0;
+    const fail = (message) => {
+      const error = new Error(message);
+      // 让调用方能区分「预检就被拦下」和「传了一半断了」
+      error.sentBytes = sentBytes;
+      reject(error);
+    };
+    xhr.open("PUT", url, true);
+    xhr.upload.addEventListener("progress", (e) => {
+      sentBytes = e.loaded;
+      if (e.lengthComputable) onProgress((e.loaded / e.total) * 100);
+    });
+    xhr.onload = () =>
+      xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : fail(`上传失败 HTTP ${xhr.status}`);
+    xhr.onerror = () =>
+      fail("直传被浏览器拦下：R2 桶多半没放开 PUT 跨域");
+    xhr.send(file);
+  });
+}
+
+/** 拿直传签名；R2 没开或签不出来时返回 null，让调用方退回服务器直传。 */
+async function requestImportPresign(file) {
+  setImportProgress(2, "申请上传地址…");
+  try {
+    const res = await apiFetch("/imports/presign", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, size: file.size }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.upload_url) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function importViaR2(file, title, signed) {
+  await putWithProgress(signed.upload_url, file, (percent) => {
+    setImportProgress(2 + percent * 0.78, `上传中 ${percent.toFixed(0)}%`);
+  });
+  setImportProgress(85, "服务器正在收取文件…");
+  const commit = await apiFetch("/imports/commit", {
+    method: "POST",
+    body: JSON.stringify({
+      minute_token: signed.minute_token,
+      object_key: signed.object_key,
+      filename: file.name,
+      title: title || null,
+    }),
+  });
+  const data = await commit.json().catch(() => ({}));
+  if (!commit.ok) {
+    throw new Error(
+      typeof data.detail === "string" ? data.detail : commit.statusText
+    );
+  }
+  return data;
+}
+
+async function importViaServer(file, title) {
+  const form = new FormData();
+  form.append("file", file);
+  if (title) form.append("title", title);
+  setImportProgress(10, "上传中…");
+  // 不走 apiFetch：它会给 body 补 application/json，而 multipart 必须让浏览器
+  // 自己写 Content-Type 才带得上 boundary
+  const headers = {};
+  const bearer = getActiveBearer();
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  const res = await fetch(`${API}/imports/upload`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof data.detail === "string" ? data.detail : res.statusText);
+  }
+  return data;
+}
+
+async function confirmImport() {
+  const file = $("#import-file")?.files?.[0];
+  if (!file) {
+    setImportProgress(0, "请先选择文件");
+    return;
+  }
+  const title = $("#import-title-input")?.value.trim() || "";
+  $("#import-confirm").disabled = true;
+  try {
+    // 直传签名拿不到（R2 关着）就退回服务器直传
+    const signed =
+      file.size > IMPORT_DIRECT_LIMIT ? await requestImportPresign(file) : null;
+    let data = null;
+    if (signed) {
+      try {
+        data = await importViaR2(file, title, signed);
+      } catch (e) {
+        // 一个字节都没出去（多半是预检就被 CORS 拦了）才回退，传了一半就不回退，
+        // 免得让几百兆重传一遍
+        if (e?.sentBytes) throw e;
+        setImportProgress(5, "直传被拦，改走服务器上传…");
+        data = await importViaServer(file, title);
+      }
+    } else {
+      data = await importViaServer(file, title);
+    }
+    setImportProgress(100, data.message || "已导入");
+    setStatus(`已导入「${data.title}」，${data.message || ""}`);
+    closeImportDialog();
+    await refreshFromCloud();
+    openMeeting(data.minute_token);
+  } catch (e) {
+    setImportProgress(0, `导入失败：${e.message || e}`);
+    $("#import-confirm").disabled = false;
   }
 }
 
@@ -1590,6 +1749,11 @@ bindMultiSelect("status-filter", {
   onChange: () => applyLocalView({ resetPage: true }),
 });
 bindFilterTagClicks($("#owner-filter-tags"), () => applyLocalView({ resetPage: true }));
+$("#import-btn")?.addEventListener("click", openImportDialog);
+$("#import-confirm")?.addEventListener("click", confirmImport);
+$("#import-dialog")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-close-dialog]")) closeImportDialog();
+});
 $("#select-all-btn").addEventListener("click", selectAllVisible);
 $("#download-btn").addEventListener("click", downloadSelected);
 $("#batch-summary-btn").addEventListener("click", batchGenerateSummaries);

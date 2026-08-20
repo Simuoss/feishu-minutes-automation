@@ -11,7 +11,9 @@ PyJWT>=2.9.0
 Pillow>=10.0.0
 
 # 导出：纪要 pdf/docx，转写 md/txt
+# python-docx 与 pypdf 兼作本地导入的文档解析
 python-docx>=1.1.0
+pypdf>=4.0.0
 markdown>=3.5.0
 xhtml2pdf>=0.2.11
 

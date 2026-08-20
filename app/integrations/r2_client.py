@@ -33,17 +33,20 @@ def _is_access_denied(exc: BaseException) -> bool:
     return "accessdenied" in text or "access denied" in text
 
 
-def cors_rules_cover_origins(rules: list[Any], origins: list[str]) -> bool:
-    """已有 CORS 规则是否已覆盖所需 Origin 的 GET/HEAD。"""
+def cors_rules_cover_origins(
+    rules: list[Any], origins: list[str], *, method: str = "GET"
+) -> bool:
+    """已有 CORS 规则是否已覆盖所需 Origin 的指定方法。"""
     needed = {o.rstrip("/") for o in origins if o}
     if not needed:
         return True
+    wanted = method.upper()
     for rule in rules:
         if not isinstance(rule, dict):
             continue
         allowed = {str(item).rstrip("/") for item in (rule.get("AllowedOrigins") or [])}
         methods = {str(item).upper() for item in (rule.get("AllowedMethods") or [])}
-        if "GET" not in methods:
+        if wanted not in methods:
             continue
         if "*" in allowed or needed.issubset(allowed):
             return True
@@ -213,6 +216,39 @@ class R2Client:
             raise R2ClientError(f"生成签名 URL 失败 key={key}")
         return url
 
+    async def presign_put(
+        self,
+        key: str,
+        *,
+        expires_in: int | None = None,
+        content_type: str | None = None,
+    ) -> str:
+        """签一个浏览器直传用的 PUT URL。
+
+        不把 ContentType 塞进签名参数，除非调用方明确要求：预签名 URL 只校验
+        SignedHeaders 里的头，浏览器给 Blob 自动带的 Content-Type 不在其中，
+        签了反而要求前端一字不差地对上。
+        """
+        from app.core import runtime_config
+
+        ttl = (
+            expires_in
+            if expires_in is not None
+            else runtime_config.get_int("R2_SIGNED_URL_TTL_SECONDS", 7200)
+        )
+        params: dict[str, Any] = {"Bucket": settings.r2_bucket.strip(), "Key": key}
+        if content_type:
+            params["ContentType"] = content_type
+        async with self._client() as client:
+            url = await client.generate_presigned_url(
+                "put_object",
+                Params=params,
+                ExpiresIn=max(60, int(ttl)),
+            )
+        if not url:
+            raise R2ClientError(f"生成上传签名 URL 失败 key={key}")
+        return url
+
     async def ensure_browser_cors(self, allowed_origins: list[str]) -> None:
         """桶 CORS 已覆盖所需 Origin 则跳过；无写权限时假定控制台已手配，不报 ERROR。"""
         origins = [o.strip().rstrip("/") for o in allowed_origins if (o or "").strip()]
@@ -231,6 +267,13 @@ class R2Client:
                 current = await client.get_bucket_cors(Bucket=bucket)
                 rules = list(current.get("CORSRules") or [])
                 if cors_rules_cover_origins(rules, unique):
+                    if not cors_rules_cover_origins(rules, unique, method="PUT"):
+                        logger.warning(
+                            "R2 桶 CORS 只放开了读取，没放开 PUT："
+                            "本地导入的浏览器直传会被拦。请在 Cloudflare 控制台给这些 "
+                            "Origin 补上 PUT 并 expose ETag。origins=%s",
+                            unique,
+                        )
                     logger.info("R2 桶 CORS 已覆盖前端 Origin，跳过写入")
                     return
             except Exception as exc:  # noqa: BLE001
@@ -248,7 +291,8 @@ class R2Client:
                         "CORSRules": [
                             {
                                 "AllowedOrigins": unique,
-                                "AllowedMethods": ["GET", "HEAD"],
+                                # PUT 是本地导入的浏览器直传要用的
+                                "AllowedMethods": ["GET", "HEAD", "PUT"],
                                 "AllowedHeaders": ["*"],
                                 "ExposeHeaders": [
                                     "ETag",
