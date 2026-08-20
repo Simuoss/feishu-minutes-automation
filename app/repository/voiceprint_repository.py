@@ -2,10 +2,14 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.data_model.entity.voiceprint import (
+    PROPOSAL_PENDING,
     MeetingSpeakerEntity,
     MeetingSpeakerUpsertEntity,
+    ProposalSample,
     VoiceprintCreateEntity,
     VoiceprintEntity,
+    VoiceprintNameProposalCreateEntity,
+    VoiceprintNameProposalEntity,
     VoiceprintSampleCreateEntity,
     VoiceprintSampleEntity,
     VoiceprintUpdateEntity,
@@ -13,6 +17,7 @@ from app.data_model.entity.voiceprint import (
 from app.repository.json_map import dump_json, load_json_list
 from app.repository.orm.voiceprint import (
     MeetingSpeakerORM,
+    VoiceprintNameProposalORM,
     VoiceprintORM,
     VoiceprintSampleORM,
 )
@@ -49,6 +54,37 @@ def _to_sample(orm: VoiceprintSampleORM) -> VoiceprintSampleEntity:
         end_ms=orm.end_ms,
         score=orm.score,
         created_at=orm.created_at,
+    )
+
+
+def _to_proposal(
+    orm: VoiceprintNameProposalORM,
+) -> VoiceprintNameProposalEntity:
+    samples: list[ProposalSample] = []
+    for item in load_json_list(orm.samples_json):
+        if not isinstance(item, dict):
+            continue
+        samples.append(
+            ProposalSample(
+                start_ms=int(item.get("start_ms") or 0),
+                end_ms=int(item.get("end_ms") or 0),
+                score=item.get("score"),
+            )
+        )
+    return VoiceprintNameProposalEntity(
+        id=orm.id,
+        owner_user_id=orm.owner_user_id,
+        minute_token=orm.minute_token,
+        proposed_name=orm.proposed_name,
+        voiceprint_id=orm.voiceprint_id,
+        embedding=orm.embedding,
+        dim=orm.dim,
+        score=orm.score,
+        sample_count=orm.sample_count or 0,
+        samples=samples,
+        status=orm.status,
+        created_at=orm.created_at,
+        decided_at=orm.decided_at,
     )
 
 
@@ -287,6 +323,93 @@ class VoiceprintRepository:
             delete(VoiceprintSampleORM).where(
                 VoiceprintSampleORM.owner_user_id == owner_user_id,
                 VoiceprintSampleORM.minute_token == minute_token,
+            )
+        )
+        await self._session.flush()
+
+    # ---------- 命名提案 ----------
+
+    async def add_proposal(
+        self, entity: VoiceprintNameProposalCreateEntity
+    ) -> VoiceprintNameProposalEntity:
+        orm = VoiceprintNameProposalORM(
+            owner_user_id=entity.owner_user_id,
+            minute_token=entity.minute_token,
+            proposed_name=entity.proposed_name,
+            voiceprint_id=entity.voiceprint_id,
+            embedding=entity.embedding,
+            dim=entity.dim,
+            score=entity.score,
+            sample_count=entity.sample_count,
+            samples_json=dump_json(
+                [
+                    {
+                        "start_ms": s.start_ms,
+                        "end_ms": s.end_ms,
+                        "score": s.score,
+                    }
+                    for s in entity.samples
+                ],
+                default="[]",
+            ),
+            status=PROPOSAL_PENDING,
+            created_at=_now_ms(),
+        )
+        self._session.add(orm)
+        await self._session.flush()
+        await self._session.refresh(orm)
+        return _to_proposal(orm)
+
+    async def get_proposal(
+        self, proposal_id: int
+    ) -> VoiceprintNameProposalEntity | None:
+        orm = await self._session.get(VoiceprintNameProposalORM, proposal_id)
+        return _to_proposal(orm) if orm else None
+
+    async def list_proposals(
+        self,
+        *,
+        status: str | None = PROPOSAL_PENDING,
+        owner_user_id: int | None = None,
+        minute_token: str | None = None,
+        limit: int = 200,
+    ) -> list[VoiceprintNameProposalEntity]:
+        stmt = select(VoiceprintNameProposalORM)
+        if status is not None:
+            stmt = stmt.where(VoiceprintNameProposalORM.status == status)
+        if owner_user_id is not None:
+            stmt = stmt.where(
+                VoiceprintNameProposalORM.owner_user_id == owner_user_id
+            )
+        if minute_token is not None:
+            stmt = stmt.where(
+                VoiceprintNameProposalORM.minute_token == minute_token
+            )
+        stmt = stmt.order_by(VoiceprintNameProposalORM.id.desc()).limit(limit)
+        result = await self._session.execute(stmt)
+        return [_to_proposal(orm) for orm in result.scalars().all()]
+
+    async def set_proposal_status(
+        self, proposal_id: int, status: str
+    ) -> VoiceprintNameProposalEntity | None:
+        orm = await self._session.get(VoiceprintNameProposalORM, proposal_id)
+        if orm is None:
+            return None
+        orm.status = status
+        orm.decided_at = _now_ms()
+        await self._session.flush()
+        await self._session.refresh(orm)
+        return _to_proposal(orm)
+
+    async def clear_pending_proposals(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> None:
+        """同一场会议重跑提炼前先清掉上一轮没人处理的提案，避免堆重复。"""
+        await self._session.execute(
+            delete(VoiceprintNameProposalORM).where(
+                VoiceprintNameProposalORM.owner_user_id == owner_user_id,
+                VoiceprintNameProposalORM.minute_token == minute_token,
+                VoiceprintNameProposalORM.status == PROPOSAL_PENDING,
             )
         )
         await self._session.flush()

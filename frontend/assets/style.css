@@ -2292,10 +2292,77 @@ body {
 
 
 /* —— 声纹人物（超管） —— */
-.voiceprint-list {
+.voiceprint-list,
+.proposal-list {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
+}
+
+.proposal-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent, var(--border));
+  padding: 0.75rem 0.9rem;
+  background: var(--bg);
+}
+
+.proposal-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.proposal-name {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.proposal-badge {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+}
+
+.proposal-badge-high {
+  border-color: var(--success, #2f855a);
+  color: var(--success, #2f855a);
+}
+
+.proposal-badge-mid {
+  color: var(--muted);
+}
+
+.proposal-badge-low {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.proposal-badge-new {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.proposal-meta,
+.proposal-meeting {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.proposal-meeting {
+  margin-left: auto;
+}
+
+.proposal-target {
+  margin: 0.4rem 0 0.55rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.proposal-foot {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
 }
 
 .voiceprint-card {

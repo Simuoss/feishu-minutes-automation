@@ -237,6 +237,21 @@ class MeetingStorageService:
                 return f.read_text(encoding="utf-8", errors="replace")
         return None
 
+    def read_feishu_transcript(
+        self, minute_token: str, *, owner_user_id: int
+    ) -> str | None:
+        """只读飞书原文。
+
+        默认读路径是 ASR 优先，但飞书那份带的是真名，声纹提炼要的正是它。
+        """
+        for f in self._list_transcript_files(
+            minute_token, owner_user_id=owner_user_id
+        ):
+            if f.name == ASR_TRANSCRIPT_FILENAME:
+                continue
+            return f.read_text(encoding="utf-8", errors="replace")
+        return None
+
     def read_transcript(
         self, minute_token: str, *, owner_user_id: int
     ) -> str | None:

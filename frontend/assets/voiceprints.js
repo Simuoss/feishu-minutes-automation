@@ -103,6 +103,99 @@ function cardHtml(person) {
   </article>`;
 }
 
+/** 提案的相似度决定它有多可信，所以分档上色而不是只印个数字。 */
+function scoreBadge(proposal) {
+  if (proposal.voiceprint_id === null || proposal.voiceprint_id === undefined) {
+    return `<span class="proposal-badge proposal-badge-new">新面孔</span>`;
+  }
+  const score = Number(proposal.score) || 0;
+  const level = score >= 0.7 ? "high" : score >= 0.6 ? "mid" : "low";
+  return `<span class="proposal-badge proposal-badge-${level}">相似度 ${score.toFixed(
+    2
+  )}</span>`;
+}
+
+function proposalHtml(proposal) {
+  const target =
+    proposal.voiceprint_id === null || proposal.voiceprint_id === undefined
+      ? "批准后新建一位人物"
+      : `批准后把 #${proposal.voiceprint_id}${
+          proposal.current_name ? `（${proposal.current_name}）` : "（未命名）"
+        } 命名为此人`;
+  const samples = (proposal.samples || [])
+    .map((s) => sampleHtml({ ...s, audio_url: proposal.audio_url }))
+    .join("");
+  const meeting = proposal.meeting_title || proposal.minute_token;
+  return `<article class="proposal-card" data-id="${proposal.id}">
+    <header class="proposal-head">
+      <span class="proposal-name">${escapeHtml(proposal.proposed_name)}</span>
+      ${scoreBadge(proposal)}
+      <span class="proposal-meta">${proposal.sample_count} 段样本</span>
+      <a class="proposal-meeting" href="/meeting.html?token=${encodeURIComponent(
+        proposal.minute_token
+      )}&owner_user_id=${proposal.owner_user_id}">${escapeHtml(meeting)}</a>
+    </header>
+    <p class="proposal-target">${escapeHtml(target)}</p>
+    <ul class="voiceprint-samples">${
+      samples || "<li class='voiceprint-sample-missing'>暂无样本</li>"
+    }</ul>
+    <footer class="proposal-foot">
+      <button type="button" class="btn btn-sm btn-primary" data-action="approve">
+        <i class="ri ri-check-line" aria-hidden="true"></i><span class="btn-label">批准</span>
+      </button>
+      <button type="button" class="btn btn-sm" data-action="reject">
+        <i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">驳回</span>
+      </button>
+    </footer>
+  </article>`;
+}
+
+async function loadProposals() {
+  const panel = $("#proposal-panel");
+  const status = $("#proposals-status");
+  const list = $("#proposals-list");
+  if (!panel || !list) return;
+  try {
+    const res = await apiFetch("/admin/voiceprints/proposals");
+    if (!res.ok) return;
+    const data = await res.json();
+    const items = data.items || [];
+    if (!items.length) {
+      panel.classList.add("hidden");
+      return;
+    }
+    status.textContent = `${items.length} 条待确认`;
+    list.innerHTML = items.map(proposalHtml).join("");
+    panel.classList.remove("hidden");
+  } catch {
+    /* 提案区块是附加能力，失败不影响人物库 */
+  }
+}
+
+async function decideProposal(id, action) {
+  const status = $("#proposals-status");
+  if (
+    action === "reject" &&
+    !confirm("驳回后这条提案不再出现；下次对该会议重跑提炼时还会重新提出。确定吗？")
+  ) {
+    return;
+  }
+  setThinkingStatus(status);
+  try {
+    const res = await apiFetch(`/admin/voiceprints/proposals/${id}/${action}`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(typeof err.detail === "string" ? err.detail : res.statusText);
+    }
+    status.textContent = action === "approve" ? "已批准" : "已驳回";
+    await Promise.all([loadProposals(), loadVoiceprints()]);
+  } catch (e) {
+    status.textContent = `处理失败：${e.message || e}`;
+  }
+}
+
 async function loadVoiceprints() {
   const status = $("#voiceprints-status");
   const list = $("#voiceprints-list");
@@ -195,7 +288,16 @@ async function deletePerson(id) {
   }
 }
 
-$("#refresh-voiceprints-btn")?.addEventListener("click", loadVoiceprints);
+$("#refresh-voiceprints-btn")?.addEventListener("click", () => {
+  loadProposals();
+  loadVoiceprints();
+});
+$("#proposals-list")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  const id = btn?.closest(".proposal-card")?.dataset.id;
+  if (!id) return;
+  decideProposal(id, btn.getAttribute("data-action"));
+});
 $("#voiceprints-list")?.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
@@ -210,4 +312,5 @@ $("#voiceprints-list")?.addEventListener("click", (e) => {
 
 bindAdminNav();
 checkAuth();
+loadProposals();
 loadVoiceprints();

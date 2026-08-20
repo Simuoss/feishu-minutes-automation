@@ -12,6 +12,7 @@ from app.service.pipeline_queue import (
     JOB_SHARE_VIDEO,
     JOB_SUMMARY,
     JOB_TRANSCRIBE,
+    JOB_VOICEPRINT,
     STATUS_COMPLETED,
     STATUS_FAILED,
     claim_next_job,
@@ -110,6 +111,8 @@ class PipelineWorker:
                 await self._run_share_video(job)
             elif job.job_type == JOB_TRANSCRIBE:
                 await self._run_transcribe(job)
+            elif job.job_type == JOB_VOICEPRINT:
+                await self._run_voiceprint(job)
             else:
                 await update_job(
                     job.id,
@@ -172,6 +175,63 @@ class PipelineWorker:
         from app.service.transcription_flow import run_transcribe_job
 
         await run_transcribe_job(job)
+
+    async def _run_voiceprint(self, job: PipelineJobEntity) -> None:
+        """从飞书转写的真名提炼声纹，产出待确认提案。"""
+        from app.service.voiceprint_harvest_service import (
+            VoiceprintHarvestError,
+            harvest_meeting,
+        )
+
+        loop = asyncio.get_running_loop()
+
+        def on_progress(stage: str, percent: float) -> None:
+            asyncio.run_coroutine_threadsafe(
+                update_job(job.id, stage=stage, percent=percent), loop
+            )
+
+        duration_ms = await self._meeting_duration_ms(job)
+        try:
+            result = await harvest_meeting(
+                job.minute_token,
+                owner_user_id=job.owner_user_id,
+                duration_ms=duration_ms,
+                on_progress=on_progress,
+            )
+        except VoiceprintHarvestError as exc:
+            # 提炼是锦上添花，而且这类原因都是「这场会议没这个条件」，不是出错，
+            # 标成失败只会让作业列表里堆一排看着吓人却无从修的红条
+            logger.info(
+                "声纹提炼跳过 token=%s: %s", job.minute_token, exc
+            )
+            await update_job(
+                job.id,
+                status=STATUS_COMPLETED,
+                stage="SKIPPED",
+                percent=100.0,
+                error_message=str(exc),
+                finished=True,
+            )
+            return
+        logger.info("声纹提炼收尾 token=%s %s", job.minute_token, result.message)
+        await update_job(
+            job.id,
+            status=STATUS_COMPLETED,
+            stage=f"待确认提案 {result.proposals} 条",
+            percent=100.0,
+            finished=True,
+        )
+
+    @staticmethod
+    async def _meeting_duration_ms(job: PipelineJobEntity) -> int | None:
+        from app.repository.uow import UnitOfWork
+
+        async with UnitOfWork() as uow:
+            assert uow.meeting_records is not None
+            record = await uow.meeting_records.get_latest_by_minute_token(
+                job.minute_token, owner_user_id=job.owner_user_id
+            )
+        return record.duration_ms if record else None
 
     async def _run_share_video(self, job: PipelineJobEntity) -> None:
         loop = asyncio.get_running_loop()

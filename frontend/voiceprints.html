@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/assets/favicon.png" />
   <link rel="apple-touch-icon" href="/assets/favicon.png" />
   <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
-  <link rel="stylesheet" href="/assets/style.css?v=20260815-voiceprints" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260820-import-switch" />
 </head>
 <body class="admin-body" data-admin-page="voiceprints">
   <div id="app" class="admin-shell">
@@ -26,6 +26,16 @@
       </header>
 
       <main class="view">
+        <section id="proposal-panel" class="panel hidden">
+          <h2 class="panel-title">待确认命名</h2>
+          <p class="modal-hint">
+            这些是从飞书转写的真名自动提炼出来的。姓名可信，但飞书的发言人切分会串行，
+            相似度低或样本少的务必先试听再批准。
+          </p>
+          <div id="proposals-status" class="status"></div>
+          <div id="proposals-list" class="proposal-list"></div>
+        </section>
+
         <section class="panel">
           <p class="modal-hint">
             这里的人物库是全站共享的。命名只影响转写与参会人的显示，
@@ -42,6 +52,6 @@
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
   <script defer src="/assets/common.js?v=20260816-no-r2-text"></script>
   <script defer src="/assets/admin-shell.js?v=20260815-voiceprints"></script>
-  <script defer src="/assets/voiceprints.js?v=20260815-voiceprints"></script>
+  <script defer src="/assets/voiceprints.js?v=20260820-import-switch"></script>
 </body>
 </html>

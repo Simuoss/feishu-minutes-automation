@@ -65,6 +65,7 @@ class MeetingDownloadService:
             evaluate_transcript_coverage,
             has_media_for_asr,
         )
+        from app.service.voiceprint_flow import enqueue_voiceprint
 
         storage = MeetingStorageService()
         has_video = (
@@ -92,6 +93,12 @@ class MeetingDownloadService:
                 minute_token,
             )
             return
+
+        # 沿用飞书转写就意味着段头挂着真名，正好拿来给声纹库认人
+        if has_video or storage.find_media_path(
+            minute_token, owner_user_id=owner_user_id
+        ):
+            await enqueue_voiceprint(minute_token, owner_user_id=owner_user_id)
 
         if not runtime_config.get_bool("SUMMARY_AUTO_GENERATE", True):
             return

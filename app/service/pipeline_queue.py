@@ -19,19 +19,29 @@ logger = logging.getLogger(__name__)
 JOB_SUMMARY = "SUMMARY"
 JOB_SHARE_VIDEO = "SHARE_VIDEO"
 JOB_TRANSCRIBE = "TRANSCRIBE"
+JOB_VOICEPRINT = "VOICEPRINT"
 STATUS_QUEUED = "QUEUED"
 STATUS_RUNNING = "RUNNING"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_FAILED = "FAILED"
 
-WORKER_JOB_TYPES = [JOB_SUMMARY, JOB_SHARE_VIDEO, JOB_TRANSCRIBE]
+WORKER_JOB_TYPES = [
+    JOB_SUMMARY,
+    JOB_SHARE_VIDEO,
+    JOB_TRANSCRIBE,
+    JOB_VOICEPRINT,
+]
 
 DEFAULT_MAX_ATTEMPTS = 3
 MAX_RUNNING_SHARE_VIDEO = 1
 # 转写要抽音轨、切片、跑 onnx，都吃 CPU，同时只跑一个
 MAX_RUNNING_TRANSCRIBE = 1
+# 声纹提炼同样是 ffmpeg 加 onnx，与转写一个量级
+MAX_RUNNING_VOICEPRINT = 1
 # 一场几小时的录音分段送识别，留足余量
 TRANSCRIBE_STALE_MS = int(3 * 3600 * 1000)
+# 提炼只切几段样本，比转写快得多
+VOICEPRINT_STALE_MS = int(40 * 60 * 1000)
 
 _wakeup = asyncio.Event()
 
@@ -76,10 +86,12 @@ def pick_claimable(
     *,
     max_share_video: int = MAX_RUNNING_SHARE_VIDEO,
     max_transcribe: int = MAX_RUNNING_TRANSCRIBE,
+    max_voiceprint: int = MAX_RUNNING_VOICEPRINT,
 ) -> PipelineJobEntity | None:
     """纯函数：在已查出的队列里挑下一个可跑的作业。"""
     share_running = sum(1 for j in running if j.job_type == JOB_SHARE_VIDEO)
     transcribe_running = sum(1 for j in running if j.job_type == JOB_TRANSCRIBE)
+    voiceprint_running = sum(1 for j in running if j.job_type == JOB_VOICEPRINT)
     busy_summary_owners = {
         j.owner_user_id for j in running if j.job_type == JOB_SUMMARY
     }
@@ -89,6 +101,8 @@ def pick_claimable(
         if job.job_type == JOB_SHARE_VIDEO and share_running >= max_share_video:
             continue
         if job.job_type == JOB_TRANSCRIBE and transcribe_running >= max_transcribe:
+            continue
+        if job.job_type == JOB_VOICEPRINT and voiceprint_running >= max_voiceprint:
             continue
         return job
     return None
@@ -250,6 +264,7 @@ async def fail_stale_running(
     summary_timeout_ms: int,
     share_video_timeout_ms: int,
     transcribe_timeout_ms: int = TRANSCRIBE_STALE_MS,
+    voiceprint_timeout_ms: int = VOICEPRINT_STALE_MS,
 ) -> int:
     now = _now_ms()
     marked = 0
@@ -267,6 +282,7 @@ async def fail_stale_running(
             limit = {
                 JOB_SHARE_VIDEO: share_video_timeout_ms,
                 JOB_TRANSCRIBE: transcribe_timeout_ms,
+                JOB_VOICEPRINT: voiceprint_timeout_ms,
             }.get(job.job_type, summary_timeout_ms)
             if now - int(heartbeat) < limit:
                 continue

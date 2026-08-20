@@ -186,6 +186,12 @@ def default_catalog() -> list[SystemConfigCreateEntity]:
             remark="把刀口挪到没人说话处，避免劈断句子；填 0 则按整数倍硬切",
         ),
         SystemConfigCreateEntity(
+            key="VOICEPRINT_HARVEST_ENABLED",
+            description="用飞书转写里的真名自动提炼声纹",
+            value=_bool_str(settings.voiceprint_harvest_enabled),
+            remark="结果只进待确认队列，不会直接改人物库",
+        ),
+        SystemConfigCreateEntity(
             key="SPEAKER_MATCH_THRESHOLD",
             description="声纹匹配阈值（余弦相似度）",
             value=str(settings.speaker_match_threshold),

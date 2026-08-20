@@ -52,6 +52,36 @@ class VoiceprintSampleORM(Base):
     created_at: Mapped[int] = mapped_column(BigInteger)
 
 
+class VoiceprintNameProposalORM(Base):
+    """从飞书转写的真名自动提炼出的命名提案，等人确认后才动人物库。
+
+    飞书的姓名是可信的，但它的发言人切分会串行，所以自动结果不能直接入库。
+    embedding 一并存下来，批准时不必重算。
+    """
+
+    __tablename__ = "voiceprint_name_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    minute_token: Mapped[str] = mapped_column(String(32), index=True)
+    # 飞书转写里写的名字
+    proposed_name: Mapped[str] = mapped_column(String(128))
+    # 建议命名的既有人物；为空表示建议新建
+    voiceprint_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    embedding: Mapped[bytes] = mapped_column(LargeBinary)
+    dim: Mapped[int] = mapped_column(Integer)
+    # 与 voiceprint_id 那位的余弦相似度；新建提案时为空
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 样本时间区间，JSON 数组，供页面试听核对
+    samples_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), index=True, default="PENDING")
+    created_at: Mapped[int] = mapped_column(BigInteger)
+    decided_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
 class MeetingSpeakerORM(Base):
     """一场会议里的说话人：本地编号、云端分离出的 ID、以及对应的人物。"""
 

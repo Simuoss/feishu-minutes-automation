@@ -14,9 +14,15 @@ from pydantic import BaseModel, Field
 from app.core.auth_context import require_super_admin
 from app.data_model.entity.voiceprint import VoiceprintUpdateEntity
 from app.repository.uow import UnitOfWork
+from app.service import voiceprint_harvest_service
 from app.service import voiceprint_service as vp
 from app.service.ownership import assert_meeting_readable
 from app.service.transcription_flow import refresh_speakers_json
+from app.service.voiceprint_flow import (
+    enqueue_voiceprint,
+    voiceprint_harvest_blocker,
+)
+from app.service.voiceprint_harvest_service import VoiceprintHarvestError
 
 router = APIRouter(prefix="/admin/voiceprints", tags=["admin-voiceprints"])
 
@@ -78,6 +84,39 @@ class VoiceprintRenameRequest(BaseModel):
 
 class VoiceprintMergeRequest(BaseModel):
     source_ids: list[int] = Field(..., min_length=1)
+
+
+class ProposalSampleResponse(BaseModel):
+    start_ms: int
+    end_ms: int
+
+
+class ProposalItemResponse(BaseModel):
+    id: int
+    minute_token: str
+    owner_user_id: int
+    meeting_title: str | None = None
+    proposed_name: str
+    # 为空表示这是个新面孔，批准后会新建人物
+    voiceprint_id: int | None = None
+    current_name: str | None = None
+    score: float | None = None
+    sample_count: int = 0
+    status: str
+    created_at_text: str
+    # 整段会议音轨的直链，配合样本区间试听
+    audio_url: str | None = None
+    samples: list[ProposalSampleResponse] = []
+
+
+class ProposalListResponse(BaseModel):
+    items: list[ProposalItemResponse]
+    total: int
+
+
+class HarvestEnqueueResponse(BaseModel):
+    job_id: int | None = None
+    message: str
 
 
 def _ms_text(ms: int) -> str:
@@ -207,6 +246,96 @@ async def list_meeting_speakers(
                 )
             )
     return MeetingSpeakerListResponse(items=items, total=len(items))
+
+
+@router.get("/proposals", response_model=ProposalListResponse)
+async def list_proposals(
+    request: Request, status: str = "PENDING"
+) -> ProposalListResponse:
+    """待确认的命名提案。相似度和样本数摆在显眼处，低分的要试听核对。"""
+    require_super_admin(request)
+    from app.service.r2_media_service import r2_media_service
+
+    items: list[ProposalItemResponse] = []
+    async with UnitOfWork() as uow:
+        assert uow.voiceprints is not None
+        assert uow.meeting_records is not None
+        proposals = await uow.voiceprints.list_proposals(
+            status=status.upper() or None
+        )
+        for proposal in proposals:
+            record = await uow.meeting_records.get_latest_by_minute_token(
+                proposal.minute_token, owner_user_id=proposal.owner_user_id
+            )
+            person = (
+                await uow.voiceprints.resolve(proposal.voiceprint_id)
+                if proposal.voiceprint_id is not None
+                else None
+            )
+            items.append(
+                ProposalItemResponse(
+                    id=proposal.id,
+                    minute_token=proposal.minute_token,
+                    owner_user_id=proposal.owner_user_id,
+                    meeting_title=record.title if record else None,
+                    proposed_name=proposal.proposed_name,
+                    voiceprint_id=person.id if person else None,
+                    current_name=person.display_name if person else None,
+                    score=proposal.score,
+                    sample_count=proposal.sample_count,
+                    status=proposal.status,
+                    created_at_text=_ms_text(proposal.created_at),
+                    audio_url=await r2_media_service.presign_asr_audio(
+                        proposal.minute_token,
+                        owner_user_id=proposal.owner_user_id,
+                    ),
+                    samples=[
+                        ProposalSampleResponse(
+                            start_ms=s.start_ms, end_ms=s.end_ms
+                        )
+                        for s in proposal.samples
+                    ],
+                )
+            )
+    return ProposalListResponse(items=items, total=len(items))
+
+
+@router.post("/proposals/{proposal_id}/approve")
+async def approve_proposal(proposal_id: int, request: Request) -> dict[str, bool]:
+    require_super_admin(request)
+    try:
+        await voiceprint_harvest_service.approve_proposal(proposal_id)
+    except VoiceprintHarvestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/proposals/{proposal_id}/reject")
+async def reject_proposal(proposal_id: int, request: Request) -> dict[str, bool]:
+    require_super_admin(request)
+    try:
+        await voiceprint_harvest_service.reject_proposal(proposal_id)
+    except VoiceprintHarvestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/harvest/{minute_token}", response_model=HarvestEnqueueResponse)
+async def enqueue_harvest(
+    minute_token: str, request: Request, owner_user_id: int | None = None
+) -> HarvestEnqueueResponse:
+    """手动对一场会议做声纹提炼。"""
+    require_super_admin(request)
+    owner = await assert_meeting_readable(
+        request, minute_token, owner_user_id=owner_user_id
+    )
+    blocker = await voiceprint_harvest_blocker(minute_token, owner_user_id=owner)
+    if blocker is not None:
+        raise HTTPException(status_code=400, detail=blocker)
+    job_id = await enqueue_voiceprint(minute_token, owner_user_id=owner)
+    return HarvestEnqueueResponse(
+        job_id=job_id, message="已排队声纹提炼，完成后到待确认区块核对"
+    )
 
 
 @router.patch("/{voiceprint_id}", response_model=VoiceprintItemResponse)

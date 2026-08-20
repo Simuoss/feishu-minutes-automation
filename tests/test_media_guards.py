@@ -75,6 +75,9 @@ def _followup_job_types(
     async def fake_coverage(minute_token, *, owner_user_id):
         return 1.0, False
 
+    async def fake_voiceprint(minute_token, *, owner_user_id):
+        return None
+
     monkeypatch.setattr(
         download, "MeetingStorageService", lambda *a, **k: storage
     )
@@ -83,6 +86,9 @@ def _followup_job_types(
     monkeypatch.setattr(
         "app.service.transcription_flow.evaluate_transcript_coverage",
         fake_coverage,
+    )
+    monkeypatch.setattr(
+        "app.service.voiceprint_flow.enqueue_voiceprint", fake_voiceprint
     )
     runtime_config.replace_cache({"SUMMARY_AUTO_GENERATE": "false"})
     try:

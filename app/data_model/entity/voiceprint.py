@@ -62,6 +62,48 @@ class VoiceprintSampleCreateEntity:
     score: float | None = None
 
 
+PROPOSAL_PENDING = "PENDING"
+PROPOSAL_APPROVED = "APPROVED"
+PROPOSAL_REJECTED = "REJECTED"
+
+
+@dataclass
+class ProposalSample:
+    start_ms: int
+    end_ms: int
+    score: float | None = None
+
+
+@dataclass
+class VoiceprintNameProposalEntity:
+    id: int
+    owner_user_id: int
+    minute_token: str
+    proposed_name: str
+    voiceprint_id: int | None
+    embedding: bytes
+    dim: int
+    score: float | None
+    sample_count: int
+    samples: list[ProposalSample]
+    status: str
+    created_at: int
+    decided_at: int | None
+
+
+@dataclass
+class VoiceprintNameProposalCreateEntity:
+    owner_user_id: int
+    minute_token: str
+    proposed_name: str
+    embedding: bytes
+    dim: int
+    voiceprint_id: int | None = None
+    score: float | None = None
+    sample_count: int = 0
+    samples: list[ProposalSample] = field(default_factory=list)
+
+
 @dataclass
 class MeetingSpeakerEntity:
     id: int
