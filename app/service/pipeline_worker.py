@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from app.core import runtime_config
 from app.data_model.entity.pipeline_job import PipelineJobEntity
 from app.service.pipeline_job_service import update_job
 from app.service.pipeline_queue import (
+    JOB_KINDS,
     JOB_SHARE_VIDEO,
     JOB_SUMMARY,
     JOB_TRANSCRIBE,
     JOB_VOICEPRINT,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_SKIPPED,
     claim_next_job,
     fail_stale_running,
     parse_job_mode,
@@ -28,7 +31,8 @@ from app.service.summary_generation_service import summary_generation_service
 logger = logging.getLogger(__name__)
 
 HEAL_INTERVAL_SECONDS = 60.0
-SUMMARY_STALE_MS = int(2 * 3600 * 1000)
+# 跳过的原因要落进 stage 这一列，它是 VARCHAR(64)
+SKIP_REASON_MAX = 64
 
 
 class PipelineWorker:
@@ -38,7 +42,22 @@ class PipelineWorker:
         self._inflight: set[asyncio.Task[None]] = set()
         self._inflight_job_ids: set[int] = set()
 
+    def _handlers(
+        self,
+    ) -> dict[str, Callable[[PipelineJobEntity], Awaitable[None]]]:
+        """作业类型到执行入口。规则那一半在 JOB_KINDS，两边要对得上。"""
+        return {
+            JOB_SUMMARY: self._run_summary,
+            JOB_SHARE_VIDEO: self._run_share_video,
+            JOB_TRANSCRIBE: self._run_transcribe,
+            JOB_VOICEPRINT: self._run_voiceprint,
+        }
+
     def start(self) -> None:
+        missing = sorted(set(JOB_KINDS) - set(self._handlers()))
+        if missing:
+            # 少写一个 handler 的后果是那类作业永远排着不动，还不如起不来
+            raise RuntimeError(f"这些作业类型没有对应的执行入口：{missing}")
         loop = asyncio.get_running_loop()
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = loop.create_task(self._run(), name="pipeline-worker")
@@ -91,9 +110,11 @@ class PipelineWorker:
                 compress_s = runtime_config.get_float(
                     "R2_VIDEO_COMPRESS_TIMEOUT_SECONDS", 21600.0
                 )
+                # 压片的上限跟着配置走，留十分钟给上传收尾
                 await fail_stale_running(
-                    summary_timeout_ms=SUMMARY_STALE_MS,
-                    share_video_timeout_ms=int((compress_s + 600) * 1000),
+                    overrides={
+                        JOB_SHARE_VIDEO: int((compress_s + 600) * 1000)
+                    }
                 )
             except asyncio.CancelledError:
                 raise
@@ -105,15 +126,8 @@ class PipelineWorker:
         assert job.id is not None
         self._inflight_job_ids.add(job.id)
         try:
-            if job.job_type == JOB_SUMMARY:
-                await self._run_summary(job)
-            elif job.job_type == JOB_SHARE_VIDEO:
-                await self._run_share_video(job)
-            elif job.job_type == JOB_TRANSCRIBE:
-                await self._run_transcribe(job)
-            elif job.job_type == JOB_VOICEPRINT:
-                await self._run_voiceprint(job)
-            else:
+            handler = self._handlers().get(job.job_type)
+            if handler is None:
                 await update_job(
                     job.id,
                     status=STATUS_FAILED,
@@ -121,6 +135,8 @@ class PipelineWorker:
                     error_message=f"未知作业类型 {job.job_type}",
                     finished=True,
                 )
+            else:
+                await handler(job)
         except Exception as exc:
             logger.exception(
                 "作业执行失败 type=%s id=%s token=%s",
@@ -170,6 +186,23 @@ class PipelineWorker:
             finished=True,
         )
 
+    @staticmethod
+    async def _mark_skipped(job: PipelineJobEntity, reason: str) -> None:
+        """这一步不必做。原因写进 stage，别拿失败去占位。"""
+        logger.info(
+            "作业按跳过收尾 type=%s token=%s: %s",
+            job.job_type,
+            job.minute_token,
+            reason,
+        )
+        await update_job(
+            job.id,
+            status=STATUS_SKIPPED,
+            stage=reason[:SKIP_REASON_MAX],
+            percent=100.0,
+            finished=True,
+        )
+
     async def _run_transcribe(self, job: PipelineJobEntity) -> None:
         """自建转写：飞书那份被截断时才会有这个作业，跑完再放纪要进队。"""
         from app.service.transcription_flow import run_transcribe_job
@@ -199,19 +232,8 @@ class PipelineWorker:
                 on_progress=on_progress,
             )
         except VoiceprintHarvestError as exc:
-            # 提炼是锦上添花，而且这类原因都是「这场会议没这个条件」，不是出错，
-            # 标成失败只会让作业列表里堆一排看着吓人却无从修的红条
-            logger.info(
-                "声纹提炼跳过 token=%s: %s", job.minute_token, exc
-            )
-            await update_job(
-                job.id,
-                status=STATUS_COMPLETED,
-                stage="SKIPPED",
-                percent=100.0,
-                error_message=str(exc),
-                finished=True,
-            )
+            # 这类原因都是「这场会议没这个条件」，不是出错
+            await self._mark_skipped(job, str(exc))
             return
         logger.info("声纹提炼收尾 token=%s %s", job.minute_token, result.message)
         await update_job(
@@ -259,20 +281,11 @@ class PipelineWorker:
                 finished=True,
             )
             return
-        # 纯音频会议本来就没有视频可压，这不是失败，别在列表里挂一条红的
+        # 纯音频会议本来就没有视频可压，这不是失败
         if not r2_media_service.has_local_video(
             job.minute_token, owner_user_id=job.owner_user_id
         ):
-            logger.info(
-                "会议没有视频，分享片作业按跳过收尾 token=%s", job.minute_token
-            )
-            await update_job(
-                job.id,
-                status=STATUS_COMPLETED,
-                stage="SKIPPED_NO_VIDEO",
-                percent=100.0,
-                finished=True,
-            )
+            await self._mark_skipped(job, "这场会议没有视频，没有分享片可压")
             return
         await update_job(
             job.id,

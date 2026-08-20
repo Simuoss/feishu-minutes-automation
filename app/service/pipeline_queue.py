@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.data_model.entity.pipeline_job import (
@@ -24,24 +26,54 @@ STATUS_QUEUED = "QUEUED"
 STATUS_RUNNING = "RUNNING"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_FAILED = "FAILED"
-
-WORKER_JOB_TYPES = [
-    JOB_SUMMARY,
-    JOB_SHARE_VIDEO,
-    JOB_TRANSCRIBE,
-    JOB_VOICEPRINT,
-]
+# 既不是成功也不是失败：这场会议没有这个作业要处理的东西（没视频可压、没飞书原文
+# 可提炼声纹）。以前只能拿 COMPLETED 加一个特殊 stage 硬凑，红条或绿条都名不副实
+STATUS_SKIPPED = "SKIPPED"
 
 DEFAULT_MAX_ATTEMPTS = 3
-MAX_RUNNING_SHARE_VIDEO = 1
-# 转写要抽音轨、切片、跑 onnx，都吃 CPU，同时只跑一个
-MAX_RUNNING_TRANSCRIBE = 1
-# 声纹提炼同样是 ffmpeg 加 onnx，与转写一个量级
-MAX_RUNNING_VOICEPRINT = 1
-# 一场几小时的录音分段送识别，留足余量
-TRANSCRIBE_STALE_MS = int(3 * 3600 * 1000)
-# 提炼只切几段样本，比转写快得多
-VOICEPRINT_STALE_MS = int(40 * 60 * 1000)
+# 没单独交代的作业类型按两小时算卡死
+DEFAULT_STALE_MS = int(2 * 3600 * 1000)
+
+
+@dataclass(frozen=True)
+class JobKind:
+    """一种作业的排队规则。加新的作业类型只改这张表，别处不用跟着找。"""
+
+    # 日志和超时提示里用的中文名
+    label: str
+    # 全局同时在跑的上限；None 表示不限个数
+    max_running: int | None = None
+    # 同一个账号同时只跑一个（纪要是这样：一人一条，互不影响别人）
+    one_per_owner: bool = False
+    # 心跳停多久算卡死
+    stale_ms: int = DEFAULT_STALE_MS
+
+
+JOB_KINDS: dict[str, JobKind] = {
+    JOB_SUMMARY: JobKind("纪要", one_per_owner=True),
+    JOB_SHARE_VIDEO: JobKind(
+        "分享片压缩",
+        max_running=1,
+        # 实际上限由 R2_VIDEO_COMPRESS_TIMEOUT_SECONDS 决定，巡检时按配置覆盖
+        stale_ms=int(6.5 * 3600 * 1000),
+    ),
+    JOB_TRANSCRIBE: JobKind(
+        "自建转写",
+        # 抽音轨、切片、跑 onnx，都吃 CPU，同时只跑一个
+        max_running=1,
+        # 一场几小时的录音分段送识别，留足余量
+        stale_ms=int(3 * 3600 * 1000),
+    ),
+    JOB_VOICEPRINT: JobKind(
+        "声纹提炼",
+        # 同样是 ffmpeg 加 onnx，与转写一个量级
+        max_running=1,
+        # 只切几段样本，比转写快得多
+        stale_ms=int(40 * 60 * 1000),
+    ),
+}
+
+WORKER_JOB_TYPES = list(JOB_KINDS)
 
 _wakeup = asyncio.Event()
 
@@ -84,26 +116,36 @@ def pick_claimable(
     queued: list[PipelineJobEntity],
     running: list[PipelineJobEntity],
     *,
-    max_share_video: int = MAX_RUNNING_SHARE_VIDEO,
-    max_transcribe: int = MAX_RUNNING_TRANSCRIBE,
-    max_voiceprint: int = MAX_RUNNING_VOICEPRINT,
+    limits: dict[str, int] | None = None,
 ) -> PipelineJobEntity | None:
-    """纯函数：在已查出的队列里挑下一个可跑的作业。"""
-    share_running = sum(1 for j in running if j.job_type == JOB_SHARE_VIDEO)
-    transcribe_running = sum(1 for j in running if j.job_type == JOB_TRANSCRIBE)
-    voiceprint_running = sum(1 for j in running if j.job_type == JOB_VOICEPRINT)
-    busy_summary_owners = {
-        j.owner_user_id for j in running if j.job_type == JOB_SUMMARY
+    """纯函数：在已查出的队列里挑下一个可跑的作业。
+
+    并发规则全部来自 JOB_KINDS；limits 只用于测试里临时放宽某个类型的上限。
+    """
+    caps = {
+        name: kind.max_running
+        for name, kind in JOB_KINDS.items()
+        if kind.max_running is not None
+    }
+    caps.update(limits or {})
+    running_count = Counter(job.job_type for job in running)
+    busy_owners = {
+        (job.job_type, job.owner_user_id)
+        for job in running
+        if job.job_type in JOB_KINDS and JOB_KINDS[job.job_type].one_per_owner
     }
     for job in queued:
-        if job.job_type == JOB_SUMMARY and job.owner_user_id in busy_summary_owners:
-            continue
-        if job.job_type == JOB_SHARE_VIDEO and share_running >= max_share_video:
-            continue
-        if job.job_type == JOB_TRANSCRIBE and transcribe_running >= max_transcribe:
-            continue
-        if job.job_type == JOB_VOICEPRINT and voiceprint_running >= max_voiceprint:
-            continue
+        kind = JOB_KINDS.get(job.job_type)
+        # 认不出来的类型照旧放过去，让 worker 明确标失败，别让它卡在队列里
+        if kind is not None:
+            if kind.one_per_owner and (
+                job.job_type,
+                job.owner_user_id,
+            ) in busy_owners:
+                continue
+            cap = caps.get(job.job_type)
+            if cap is not None and running_count[job.job_type] >= cap:
+                continue
         return job
     return None
 
@@ -261,11 +303,11 @@ async def requeue_orphaned_running(*, max_attempts: int = DEFAULT_MAX_ATTEMPTS) 
 
 async def fail_stale_running(
     *,
-    summary_timeout_ms: int,
-    share_video_timeout_ms: int,
-    transcribe_timeout_ms: int = TRANSCRIBE_STALE_MS,
-    voiceprint_timeout_ms: int = VOICEPRINT_STALE_MS,
+    overrides: dict[str, int] | None = None,
 ) -> int:
+    """心跳停太久的作业标失败。超时上限来自 JOB_KINDS，可按类型临时覆盖。"""
+    timeouts = {name: kind.stale_ms for name, kind in JOB_KINDS.items()}
+    timeouts.update(overrides or {})
     now = _now_ms()
     marked = 0
     failed_summaries: list[tuple[str, int]] = []
@@ -279,19 +321,20 @@ async def fail_stale_running(
             if job.id is None:
                 continue
             heartbeat = job.broker_updated_at or job.started_at or 0
-            limit = {
-                JOB_SHARE_VIDEO: share_video_timeout_ms,
-                JOB_TRANSCRIBE: transcribe_timeout_ms,
-                JOB_VOICEPRINT: voiceprint_timeout_ms,
-            }.get(job.job_type, summary_timeout_ms)
+            limit = timeouts.get(job.job_type, DEFAULT_STALE_MS)
             if now - int(heartbeat) < limit:
                 continue
+            kind = JOB_KINDS.get(job.job_type)
+            label = kind.label if kind else job.job_type
             await uow.pipeline_jobs.update(
                 PipelineJobUpdateEntity(
                     id=job.id,
                     status=STATUS_FAILED,
                     stage="TIMEOUT",
-                    error_message=f"作业心跳超时（>{limit // 60000} 分钟）已标记失败，可重新提交",
+                    error_message=(
+                        f"{label}心跳超时（>{limit // 60000} 分钟）"
+                        "已标记失败，可重新提交"
+                    ),
                     finished_at=now,
                     broker_updated_at=now,
                 )
@@ -328,6 +371,11 @@ def job_to_progress(
         status = SummaryStatus.FAILED.value
         stage = job.stage or "失败"
         percent = int(job.percent or 0)
+    elif job.status == STATUS_SKIPPED:
+        # 对外没必要多一种状态：这一步不必做，等于这一步过了。原因在 stage 里
+        status = SummaryStatus.COMPLETED.value
+        stage = job.stage or "已跳过"
+        percent = 100
     else:
         status = SummaryStatus.COMPLETED.value
         stage = job.stage or "完成"

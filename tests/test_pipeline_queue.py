@@ -61,7 +61,9 @@ def test_pick_claimable_limits_share_video():
     queued = [_job(job_id=2, job_type=JOB_SHARE_VIDEO, status=STATUS_QUEUED)]
     running = [_job(job_id=1, job_type=JOB_SHARE_VIDEO, status=STATUS_RUNNING)]
     assert pick_claimable(queued, running) is None
-    assert pick_claimable(queued, running, max_share_video=2) is not None
+    assert (
+        pick_claimable(queued, running, limits={JOB_SHARE_VIDEO: 2}) is not None
+    )
 
 
 def test_pick_claimable_limits_transcribe():
@@ -74,7 +76,18 @@ def test_pick_claimable_limits_transcribe():
     picked = pick_claimable(queued, running)
     assert picked is not None
     assert picked.id == 3
-    assert pick_claimable(queued[:1], running, max_transcribe=2) is not None
+    assert (
+        pick_claimable(queued[:1], running, limits={JOB_TRANSCRIBE: 2})
+        is not None
+    )
+
+
+def test_every_job_kind_has_a_handler():
+    """规则表和执行入口分居两处，少写一半就会有作业永远排着不动。"""
+    from app.service.pipeline_queue import JOB_KINDS
+    from app.service.pipeline_worker import PipelineWorker
+
+    assert set(JOB_KINDS) == set(PipelineWorker()._handlers())
 
 
 def test_job_to_progress_carries_job_type_for_frontend():

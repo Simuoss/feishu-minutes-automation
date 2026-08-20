@@ -18,8 +18,8 @@ from app.service import pipeline_worker as worker_module
 from app.service.meeting_storage_service import MeetingStorageService
 from app.service.pipeline_queue import (
     JOB_SHARE_VIDEO,
-    STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_SKIPPED,
 )
 
 OWNER = 7
@@ -142,8 +142,9 @@ def test_share_clip_job_without_video_finishes_as_skipped(
 
     asyncio.run(worker_module.PipelineWorker()._run_share_video(_job()))
 
-    assert updates[-1]["status"] == STATUS_COMPLETED
-    assert updates[-1]["stage"] == "SKIPPED_NO_VIDEO"
+    # 既不是成功也不是失败，而且 stage 里得写清为什么不做
+    assert updates[-1]["status"] == STATUS_SKIPPED
+    assert "没有视频" in updates[-1]["stage"]
 
 
 def test_share_clip_job_with_video_still_reports_real_failures(
