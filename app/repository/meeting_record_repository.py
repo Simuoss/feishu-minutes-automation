@@ -9,6 +9,7 @@ from app.data_model.entity.meeting_record import (
     MeetingRecordQueryEntity,
     MeetingRecordUpdateEntity,
 )
+from app.data_model.unset import is_set
 from app.repository.orm.meeting_record import MeetingRecordORM
 
 
@@ -102,23 +103,11 @@ class MeetingRecordRepository:
             "transcript_coverage",
         ):
             value = getattr(entity, field)
-            if value is not None:
+            if is_set(value):
                 setattr(orm, field, value)
         await self._session.flush()
         await self._session.refresh(orm)
         return _to_entity(orm)
-
-    async def clear_transcript_source(self, record_id: int) -> None:
-        """把转写来源置空。
-
-        update 会跳过 None（不然每个没填的字段都会把库里的值抹掉），所以「置空」
-        这件事必须有自己的入口。
-        """
-        orm = await self._session.get(MeetingRecordORM, record_id)
-        if orm is None:
-            return
-        orm.transcript_source = None
-        await self._session.flush()
 
     async def delete_by_ids(self, ids: list[int]) -> int:
         if not ids:
@@ -156,29 +145,34 @@ class MeetingRecordRepository:
         )
         if existing is None or existing.id is None:
             return await self.create(entity)
-        updated = await self.update(
-            MeetingRecordUpdateEntity(
-                id=existing.id,
-                minute_token=entity.minute_token,
-                meeting_id=entity.meeting_id,
-                title=entity.title,
-                duration_ms=entity.duration_ms,
-                has_video=entity.has_video,
-                status=entity.status,
-                error_message=entity.error_message,
-                storage_path=entity.storage_path,
-                owner_user_id=entity.owner_user_id,
-                summary_status=entity.summary_status,
-                media_relpath=entity.media_relpath,
-                transcript_relpath=entity.transcript_relpath,
-                downloaded_at=entity.downloaded_at,
-                storage_root_relpath=entity.storage_root_relpath,
-                unique_key=entity.unique_key,
-                speakers_json=entity.speakers_json,
-                create_time=entity.create_time,
-                transcript_source=entity.transcript_source,
-                transcript_coverage=entity.transcript_coverage,
+        # 建档实体里没填的字段一律是 None，合并时当作「没提」，不能拿它去抹已有值
+        fields = {
+            name: value
+            for name, value in (
+                ("minute_token", entity.minute_token),
+                ("meeting_id", entity.meeting_id),
+                ("title", entity.title),
+                ("duration_ms", entity.duration_ms),
+                ("has_video", entity.has_video),
+                ("status", entity.status),
+                ("error_message", entity.error_message),
+                ("storage_path", entity.storage_path),
+                ("owner_user_id", entity.owner_user_id),
+                ("summary_status", entity.summary_status),
+                ("media_relpath", entity.media_relpath),
+                ("transcript_relpath", entity.transcript_relpath),
+                ("downloaded_at", entity.downloaded_at),
+                ("storage_root_relpath", entity.storage_root_relpath),
+                ("unique_key", entity.unique_key),
+                ("speakers_json", entity.speakers_json),
+                ("create_time", entity.create_time),
+                ("transcript_source", entity.transcript_source),
+                ("transcript_coverage", entity.transcript_coverage),
             )
+            if value is not None
+        }
+        updated = await self.update(
+            MeetingRecordUpdateEntity(id=existing.id, **fields)
         )
         return updated or existing
 

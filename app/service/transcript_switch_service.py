@@ -90,10 +90,7 @@ async def switch_to_asr(minute_token: str, *, owner_user_id: int) -> SwitchResul
     record = await _load_record(minute_token, owner_user_id=owner_user_id)
     if record is not None and record.id is not None:
         # 置空而不是直接写 asr：转写真跑成了才算，失败时覆盖率判定还能重来
-        async with UnitOfWork() as uow:
-            assert uow.meeting_records is not None
-            await uow.meeting_records.clear_transcript_source(record.id)
-            await uow.commit()
+        await _update_record(record.id, transcript_source=None)
 
     job_id = await enqueue_transcribe(
         minute_token, owner_user_id=owner_user_id

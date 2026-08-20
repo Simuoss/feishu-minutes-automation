@@ -10,10 +10,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
-from app.core.db_base import Base
 from app.repository.uow import UnitOfWork
 from app.service import meeting_import_service as importer
 from app.service import transcript_switch_service as switcher
@@ -25,30 +22,6 @@ from app.service.transcription_flow import (
 )
 
 OWNER = 7
-
-
-@pytest.fixture
-def _memory_db(monkeypatch: pytest.MonkeyPatch):
-    """把 UnitOfWork 指到内存库，避免测试写进开发机的 sqlite。"""
-    from app.repository.orm import meeting_record, pipeline_job, voiceprint  # noqa: F401
-
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-
-    async def create() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(create())
-    monkeypatch.setattr(
-        "app.repository.uow.async_session_factory",
-        async_sessionmaker(engine, expire_on_commit=False),
-    )
-    yield
-    asyncio.run(engine.dispose())
 
 
 @pytest.fixture

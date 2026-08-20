@@ -9,11 +9,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from app.core import runtime_config
-from app.core.db_base import Base
 from app.data_model.entity.voiceprint import (
     PROPOSAL_APPROVED,
     PROPOSAL_PENDING,
@@ -26,30 +23,6 @@ from app.service import voiceprint_service as vp
 
 OWNER = 7
 TOKEN = "obharvest0001"
-
-
-@pytest.fixture
-def _memory_db(monkeypatch: pytest.MonkeyPatch):
-    """把 UnitOfWork 指到内存库，避免测试写进开发机的 sqlite。"""
-    from app.repository.orm import meeting_record, voiceprint  # noqa: F401
-
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-
-    async def create() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(create())
-    monkeypatch.setattr(
-        "app.repository.uow.async_session_factory",
-        async_sessionmaker(engine, expire_on_commit=False),
-    )
-    yield
-    asyncio.run(engine.dispose())
 
 
 @pytest.fixture

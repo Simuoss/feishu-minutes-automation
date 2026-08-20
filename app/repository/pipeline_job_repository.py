@@ -8,6 +8,7 @@ from app.data_model.entity.pipeline_job import (
     PipelineJobEntity,
     PipelineJobUpdateEntity,
 )
+from app.data_model.unset import is_set
 from app.repository.orm.pipeline_job import PipelineJobORM
 
 
@@ -72,7 +73,7 @@ class PipelineJobRepository:
             "mode",
         ):
             value = getattr(entity, field)
-            if value is not None:
+            if is_set(value):
                 setattr(orm, field, value)
         await self._session.flush()
         await self._session.refresh(orm)

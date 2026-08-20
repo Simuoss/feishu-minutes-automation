@@ -103,23 +103,28 @@ async def upsert_meeting_meta(
         if existing and existing.id is not None:
             from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
 
-            await uow.meeting_records.update(
-                MeetingRecordUpdateEntity(
-                    id=existing.id,
-                    minute_token=entity.minute_token,
-                    title=entity.title,
-                    duration_ms=entity.duration_ms,
-                    has_video=entity.has_video,
-                    unique_key=entity.unique_key,
-                    owner_user_id=entity.owner_user_id,
-                    media_relpath=entity.media_relpath,
-                    transcript_relpath=entity.transcript_relpath,
-                    downloaded_at=entity.downloaded_at,
-                    storage_root_relpath=entity.storage_root_relpath,
-                    status=entity.status,
-                    storage_path=entity.storage_path,
-                    create_time=entity.create_time,
+            # meta 里没带的字段就是没带，不能拿它去抹已有值
+            fields = {
+                name: value
+                for name, value in (
+                    ("minute_token", entity.minute_token),
+                    ("title", entity.title),
+                    ("duration_ms", entity.duration_ms),
+                    ("has_video", entity.has_video),
+                    ("unique_key", entity.unique_key),
+                    ("owner_user_id", entity.owner_user_id),
+                    ("media_relpath", entity.media_relpath),
+                    ("transcript_relpath", entity.transcript_relpath),
+                    ("downloaded_at", entity.downloaded_at),
+                    ("storage_root_relpath", entity.storage_root_relpath),
+                    ("status", entity.status),
+                    ("storage_path", entity.storage_path),
+                    ("create_time", entity.create_time),
                 )
+                if value is not None
+            }
+            await uow.meeting_records.update(
+                MeetingRecordUpdateEntity(id=existing.id, **fields)
             )
         else:
             await uow.meeting_records.create(entity)

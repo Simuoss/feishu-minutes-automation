@@ -66,21 +66,29 @@ async def update_job(
     error_message: str | None = None,
     finished: bool = False,
 ) -> None:
+    """改作业进度。这层是给调用方图省事的，省略的参数就是不改那个字段。
+
+    最常见的用法是只报个心跳（`update_job(job_id)`），所以这里不把 None 当置空，
+    要置空的话直接写更新实体。
+    """
     if job_id is None:
         return
     now = _now_ms()
+    fields: dict[str, object] = {"broker_updated_at": now}
+    if status:
+        fields["status"] = status.upper()
+    if stage is not None:
+        fields["stage"] = stage
+    if percent is not None:
+        fields["percent"] = percent
+    if error_message is not None:
+        fields["error_message"] = error_message
+    if finished:
+        fields["finished_at"] = now
     async with UnitOfWork() as uow:
         assert uow.pipeline_jobs is not None
         await uow.pipeline_jobs.update(
-            PipelineJobUpdateEntity(
-                id=job_id,
-                status=status.upper() if status else None,
-                stage=stage,
-                percent=percent,
-                error_message=error_message,
-                finished_at=now if finished else None,
-                broker_updated_at=now,
-            )
+            PipelineJobUpdateEntity(id=job_id, **fields)
         )
         await uow.commit()
 
