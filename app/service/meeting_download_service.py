@@ -16,6 +16,7 @@ from app.repository.uow import UnitOfWork
 from app.service.download_pool import download_pool
 from app.service.download_progress_store import download_progress_store
 from app.service.meeting_storage_service import MeetingStorageService
+from app.service.metadata_db_service import read_meeting_record
 from app.service.transcript_anchor import extract_unique_speakers
 
 logger = logging.getLogger(__name__)
@@ -452,15 +453,12 @@ class MeetingDownloadService:
         layout = self._storage.ensure_layout(
             minute_token, owner_user_id=owner_id
         )
-        existing_meta = (
-            await self._storage.read_meta_async(
-                minute_token, owner_user_id=owner_id
-            )
-            or {}
+        existing = await read_meeting_record(
+            minute_token, owner_user_id=owner_id
         )
 
-        media_path = existing_meta.get("files", {}).get("media")
-        has_video = bool(existing_meta.get("has_video"))
+        media_path = existing.media_relpath if existing else None
+        has_video = bool(existing.has_video) if existing else False
         if fetch_media:
             progress(percent=15, stage="获取媒体下载链接")
             media_url = await minutes.get_media_download_url(
@@ -478,7 +476,7 @@ class MeetingDownloadService:
         else:
             progress(percent=40, stage="保留已有音视频")
 
-        transcript_path = existing_meta.get("files", {}).get("transcript")
+        transcript_path = existing.transcript_relpath if existing else None
         speakers: list[str] = []
         if fetch_transcript:
             progress(percent=75, stage="导出转写文本")
@@ -512,36 +510,19 @@ class MeetingDownloadService:
 
         progress(percent=90, stage="写入本地元数据")
 
-        meta = {
-            **existing_meta,
-            "minute_token": minute_token,
-            "title": minute_info.title,
-            "duration_ms": minute_info.duration_ms,
-            # 飞书妙记生成时间（毫秒时间戳或可解析字符串），侧栏/列表按此排序展示
-            "create_time": minute_info.create_time or existing_meta.get("create_time"),
-            "has_video": has_video,
-            "feishu_event_id": feishu_event_id,
-            "unique_key": unique_key,
-            "downloaded_at": datetime.now(timezone.utc).isoformat(),
-            "files": {
-                "media": media_path,
-                "transcript": transcript_path,
-            },
-            "reserved_dirs": {
-                "agent": str(layout["agent"]),
-                "llm": str(layout["llm"]),
-                "output": str(layout["output"]),
-            },
-        }
-        await self._storage.write_meta_async(
-            minute_token, meta, owner_user_id=owner_id
-        )
-
+        # 这两个字段飞书不一定给：没给就别动库里已有的（写 None 是置空）
+        optional: dict[str, object] = {}
+        # 妙记生成时间，侧栏和列表都按它排序
+        if minute_info.create_time:
+            optional["create_time"] = minute_info.create_time
+        if unique_key:
+            optional["unique_key"] = unique_key
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
             await uow.meeting_records.update(
                 MeetingRecordUpdateEntity(
                     id=record_id,
+                    minute_token=minute_token,
                     title=minute_info.title,
                     duration_ms=minute_info.duration_ms,
                     has_video=has_video,
@@ -549,9 +530,12 @@ class MeetingDownloadService:
                     storage_path=str(layout["base"]),
                     media_relpath=str(media_path) if media_path else None,
                     transcript_relpath=str(transcript_path) if transcript_path else None,
+                    downloaded_at=int(
+                        datetime.now(timezone.utc).timestamp() * 1000
+                    ),
                     storage_root_relpath=storage_relpath(owner_id, minute_token),
                     speakers_json=json.dumps(speakers, ensure_ascii=False),
-                    create_time=minute_info.create_time or existing_meta.get("create_time"),
+                    **optional,
                 )
             )
             await uow.commit()

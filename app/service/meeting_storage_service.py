@@ -46,80 +46,6 @@ class MeetingStorageService:
             path.mkdir(parents=True, exist_ok=True)
         return layout
 
-    async def write_meta_async(
-        self,
-        minute_token: str,
-        meta: dict[str, Any],
-        *,
-        owner_user_id: int,
-    ) -> Path:
-        layout = self.ensure_layout(minute_token, owner_user_id=owner_user_id)
-        from app.service.metadata_db_service import upsert_meeting_meta
-
-        try:
-            await upsert_meeting_meta(
-                minute_token, meta, owner_user_id=owner_user_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "写入会议元数据到 DB 失败 token=%s owner=%s，后续列表/分享可能缺标题。err=%s",
-                minute_token,
-                owner_user_id,
-                exc,
-            )
-            raise
-        return layout["base"]
-
-    def write_meta(
-        self,
-        minute_token: str,
-        meta: dict[str, Any],
-        *,
-        owner_user_id: int,
-    ) -> Path:
-        from app.core.async_bridge import run_async
-
-        return run_async(
-            self.write_meta_async(
-                minute_token, meta, owner_user_id=owner_user_id
-            )
-        )
-
-    async def read_meta_async(
-        self,
-        minute_token: str,
-        *,
-        owner_user_id: int,
-    ) -> dict[str, Any] | None:
-        require_owner_user_id(owner_user_id)
-        from app.service.metadata_db_service import read_meeting_meta
-
-        try:
-            return await read_meeting_meta(
-                minute_token, owner_user_id=owner_user_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "从 DB 读取会议元数据失败 token=%s owner=%s，将按空元数据继续。err=%s",
-                minute_token,
-                owner_user_id,
-                exc,
-            )
-            return None
-
-    def read_meta(
-        self,
-        minute_token: str,
-        *,
-        owner_user_id: int,
-    ) -> dict[str, Any] | None:
-        """同步门面：供 worker 使用；async 路由请用 read_meta_async。"""
-        from app.core.async_bridge import run_async
-
-        return run_async(
-            self.read_meta_async(minute_token, owner_user_id=owner_user_id)
-        )
-
     @staticmethod
     def _guess_extension(content_type: str | None, url: str) -> str:
         if content_type:
@@ -584,14 +510,6 @@ class MeetingStorageService:
             if path.is_file():
                 path.unlink()
 
-    def is_persisted(self, minute_token: str, *, owner_user_id: int) -> bool:
-        if self.has_media(minute_token, owner_user_id=owner_user_id) or self.has_transcript(
-            minute_token, owner_user_id=owner_user_id
-        ):
-            return True
-        meta = self.read_meta(minute_token, owner_user_id=owner_user_id)
-        return bool(meta and meta.get("status") == "COMPLETED")
-
     def _list_media_files(self, base: Path) -> list[dict[str, str]]:
         media_files: list[dict[str, str]] = []
         media_dir = base / "raw" / "media"
@@ -606,26 +524,28 @@ class MeetingStorageService:
     async def get_local_detail_async(
         self, minute_token: str, *, owner_user_id: int
     ) -> dict[str, Any] | None:
+        from app.service.metadata_db_service import ms_to_iso, read_meeting_record
+
         base = self.get_meeting_dir(minute_token, owner_user_id=owner_user_id)
-        meta = await self.read_meta_async(
+        record = await read_meeting_record(
             minute_token, owner_user_id=owner_user_id
-        ) or {}
+        )
         media_files = await asyncio.to_thread(self._list_media_files, base)
         has_transcript = await asyncio.to_thread(
             self.has_transcript, minute_token, owner_user_id=owner_user_id
         )
 
-        if not meta and not media_files and not has_transcript:
+        if record is None and not media_files and not has_transcript:
             return None
 
         return {
             "minute_token": minute_token,
-            "title": meta.get("title"),
-            "duration_ms": meta.get("duration_ms"),
-            "has_video": meta.get("has_video"),
+            "title": record.title if record else None,
+            "duration_ms": record.duration_ms if record else None,
+            "has_video": record.has_video if record else None,
             "media_files": media_files,
             "has_transcript": has_transcript,
-            "meta": meta,
+            "downloaded_at": ms_to_iso(record.downloaded_at) if record else None,
         }
 
     def get_local_detail(

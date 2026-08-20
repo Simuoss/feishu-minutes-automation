@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.data_model.entity.figure import FigureUpsertEntity
-from app.data_model.entity.meeting_record import MeetingRecordCreateEntity
+from app.data_model.entity.meeting_record import (
+    MeetingRecordCreateEntity,
+    MeetingRecordEntity,
+    MeetingRecordUpdateEntity,
+)
 from app.data_model.entity.r2_sync_state import R2SyncStateUpsertEntity
 from app.data_model.entity.redaction_figure import RedactionFigureUpsertEntity
 from app.data_model.entity.summary_run import SummaryRunEntity, SummaryRunUpsertEntity
@@ -61,6 +65,12 @@ async def upsert_meeting_meta(
     *,
     owner_user_id: int | None = None,
 ) -> None:
+    """把一份旧版 meta.json 合并进会议主档。**只给迁移脚本用。**
+
+    业务代码请直接写 meeting_records：这里收的是外部来的松散字典，认不出的键只能
+    丢掉，建档时也只能把 event_type 记成 META_BACKFILL——一旦业务代码也走这条路，
+    同一行记录就有两个来源不同的写入者，谁先到谁说了算。
+    """
     token = (minute_token or "").strip()
     if not token:
         return
@@ -101,8 +111,6 @@ async def upsert_meeting_meta(
             create_time=_normalize_create_time(meta.get("create_time")),
         )
         if existing and existing.id is not None:
-            from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
-
             # meta 里没带的字段就是没带，不能拿它去抹已有值
             fields = {
                 name: value
@@ -248,8 +256,6 @@ async def upsert_summary_meta(
             token, owner_user_id=owner_id
         )
         if record and record.id is not None:
-            from app.data_model.entity.meeting_record import MeetingRecordUpdateEntity
-
             await uow.meeting_records.update(
                 MeetingRecordUpdateEntity(id=record.id, summary_status="COMPLETED")
             )
@@ -360,44 +366,48 @@ async def upsert_r2_meta(
         await uow.commit()
 
 
-def _ms_to_iso(value: int | None) -> str | None:
+def ms_to_iso(value: int | None) -> str | None:
     if value is None:
         return None
     seconds = value / 1000.0 if value > 10_000_000_000 else float(value)
     return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
 
 
-async def read_meeting_meta(
+async def read_meeting_record(
     minute_token: str, *, owner_user_id: int
-) -> dict[str, Any] | None:
-    """读取指定 owner 下的会议元数据；必须显式传 owner_user_id。"""
+) -> MeetingRecordEntity | None:
+    """读一场会议的主档；必须显式传 owner_user_id。"""
     token = (minute_token or "").strip()
     if not token:
         return None
     owner_id = require_owner_user_id(owner_user_id)
     async with UnitOfWork() as uow:
         assert uow.meeting_records is not None
-        record = await uow.meeting_records.get_latest_by_minute_token(
+        return await uow.meeting_records.get_latest_by_minute_token(
             token, owner_user_id=owner_id
         )
-        if record is None:
-            return None
-        return {
-            "minute_token": record.minute_token,
-            "title": record.title,
-            "duration_ms": record.duration_ms,
-            "has_video": record.has_video,
-            "feishu_event_id": record.feishu_event_id,
-            "unique_key": record.unique_key,
-            "downloaded_at": _ms_to_iso(record.downloaded_at),
-            "create_time": record.create_time,
-            "files": {
-                "media": record.media_relpath,
-                "transcript": record.transcript_relpath,
-            },
-            "status": record.status,
-            "summary_status": record.summary_status,
-        }
+
+
+async def set_meeting_create_time(
+    minute_token: str, create_time: str, *, owner_user_id: int
+) -> bool:
+    """只改妙记生成时间。列表和侧栏按它排序，补齐一个字段不必动其他列。"""
+    value = _normalize_create_time(create_time)
+    if not value:
+        return False
+    owner_id = require_owner_user_id(owner_user_id)
+    async with UnitOfWork() as uow:
+        assert uow.meeting_records is not None
+        record = await uow.meeting_records.get_latest_by_minute_token(
+            minute_token, owner_user_id=owner_id
+        )
+        if record is None or record.id is None:
+            return False
+        await uow.meeting_records.update(
+            MeetingRecordUpdateEntity(id=record.id, create_time=value)
+        )
+        await uow.commit()
+    return True
 
 
 async def read_figures_manifest(
@@ -517,10 +527,7 @@ async def set_summary_status(
     token = (minute_token or "").strip()
     if not token:
         return
-    from app.data_model.entity.meeting_record import (
-        MeetingRecordQueryEntity,
-        MeetingRecordUpdateEntity,
-    )
+    from app.data_model.entity.meeting_record import MeetingRecordQueryEntity
 
     async with UnitOfWork() as uow:
         assert uow.meeting_records is not None

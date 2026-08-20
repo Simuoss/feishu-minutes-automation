@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.core.config import settings
+from app.data_model.entity.meeting_record import MeetingRecordEntity
 from app.data_model.entity.share import (
     ShareAdminItemEntity,
     ShareAdminListEntity,
@@ -31,7 +32,10 @@ from app.data_model.entity.share_access_log import (
 from app.repository.uow import UnitOfWork
 from app.integrations.feishu.minutes_client import FeishuMinutesClient
 from app.service.access_key_service import access_key_service, hash_access_key
-from app.service.meeting_storage_service import MeetingStorageService
+from app.service.metadata_db_service import (
+    read_meeting_record,
+    set_meeting_create_time,
+)
 from app.service.share_session_store import ShareSession, share_session_store
 from app.service.time_utils import utc_now_ms
 from app.service.ua_parse import parse_user_agent
@@ -80,9 +84,6 @@ class ShareClientContext:
 
 
 class ShareService:
-    def __init__(self) -> None:
-        self._storage = MeetingStorageService()
-
     def share_url(self, share_token: str) -> str:
         origin = settings.frontend_origin.rstrip("/")
         return f"{origin}/share.html?s={share_token}"
@@ -140,7 +141,7 @@ class ShareService:
             access_key_id=access_key_id,
             owner_user_id=owner_user_id,
         )
-        if await self._storage.read_meta_async(
+        if await read_meeting_record(
             minute_token, owner_user_id=owner_user_id
         ) is None:
             raise LookupError("本地未找到该会议，请先下载")
@@ -194,7 +195,7 @@ class ShareService:
             created_now: dict[str, ShareEntity] = {}
             now = utc_now_ms()
             for minute_token in ordered_tokens:
-                if await self._storage.read_meta_async(
+                if await read_meeting_record(
                     minute_token, owner_user_id=owner_id
                 ) is None:
                     results.append(
@@ -290,16 +291,14 @@ class ShareService:
         items: list[ShareAdminItemEntity] = []
         keyword = (q.q or "").strip().lower()
         for share in rows:
-            if share.owner_user_id is None:
-                meta = {}
-            else:
-                meta = (
-                    await self._storage.read_meta_async(
-                        share.minute_token, owner_user_id=share.owner_user_id
-                    )
-                    or {}
+            record = (
+                None
+                if share.owner_user_id is None
+                else await read_meeting_record(
+                    share.minute_token, owner_user_id=share.owner_user_id
                 )
-            title = meta.get("title")
+            )
+            title = record.title if record else None
             title_str = str(title) if title else None
             if keyword:
                 hay = f"{title_str or ''} {share.minute_token} {share.share_token}".lower()
@@ -519,13 +518,10 @@ class ShareService:
                     fail_reason=FAIL_SHARE_REVOKED,
                 )
             raise LookupError("分享不存在或已失效")
-        meta = (
-            await self._storage.read_meta_async(
-                share.minute_token, owner_user_id=share.owner_user_id
-            )
-            or {}
+        record = await read_meeting_record(
+            share.minute_token, owner_user_id=share.owner_user_id
         )
-        title = str(meta.get("title") or share.minute_token)
+        title = str((record.title if record else None) or share.minute_token)
         await self.log_access(
             share_id=share.id,  # type: ignore[arg-type]
             minute_token=share.minute_token,
@@ -804,9 +800,9 @@ class ShareService:
             except ValueError:
                 return 0.0
 
-        def _library_item_from_meta(
+        def _library_item_from_record(
             share: ShareEntity,
-            meta: dict,
+            record: MeetingRecordEntity | None,
             *,
             source: str,
             matched_key_prefix: str | None,
@@ -814,18 +810,12 @@ class ShareService:
         ) -> ShareLibraryItemEntity | None:
             if share.owner_user_id is None:
                 return None
-            title = str(meta.get("title") or share.minute_token)
-            raw_duration = meta.get("duration_ms")
-            duration_ms = (
-                int(raw_duration)
-                if isinstance(raw_duration, (int, float)) and raw_duration > 0
-                else None
-            )
+            title = str((record.title if record else None) or share.minute_token)
+            raw_duration = record.duration_ms if record else None
+            duration_ms = raw_duration if raw_duration and raw_duration > 0 else None
             resolved_create = create_time
-            if not resolved_create:
-                raw_ct = meta.get("create_time")
-                if raw_ct is not None and str(raw_ct).strip():
-                    resolved_create = str(raw_ct).strip()
+            if not resolved_create and record and record.create_time:
+                resolved_create = record.create_time.strip() or None
             return ShareLibraryItemEntity(
                 share_token=share.share_token,
                 minute_token=share.minute_token,
@@ -840,12 +830,12 @@ class ShareService:
             )
 
         async def _ensure_create_time(
-            share: ShareEntity, meta: dict
+            share: ShareEntity, record: MeetingRecordEntity | None
         ) -> str | None:
-            """优先读本地 meta；缺失时向飞书补拉妙记生成时间并回写。"""
-            raw = meta.get("create_time")
-            if raw is not None and str(raw).strip():
-                return str(raw).strip()
+            """优先读主档；缺失时向飞书补拉妙记生成时间并回写。"""
+            known = (record.create_time or "").strip() if record else ""
+            if known:
+                return known
             if share.owner_user_id is None or not share.minute_token:
                 return None
             try:
@@ -864,11 +854,10 @@ class ShareService:
             if not info.create_time:
                 return None
             create_time = str(info.create_time).strip()
-            meta["create_time"] = create_time
             try:
-                await self._storage.write_meta_async(
+                await set_meeting_create_time(
                     share.minute_token,
-                    meta,
+                    create_time,
                     owner_user_id=share.owner_user_id,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -902,16 +891,13 @@ class ShareService:
         for share, source, matched_prefix in pending:
             if share.owner_user_id is None:
                 continue
-            meta = (
-                await self._storage.read_meta_async(
-                    share.minute_token, owner_user_id=share.owner_user_id
-                )
-                or {}
+            record = await read_meeting_record(
+                share.minute_token, owner_user_id=share.owner_user_id
             )
-            create_time = await _ensure_create_time(share, meta)
-            item = _library_item_from_meta(
+            create_time = await _ensure_create_time(share, record)
+            item = _library_item_from_record(
                 share,
-                meta,
+                record,
                 source=source,
                 matched_key_prefix=matched_prefix,
                 create_time=create_time,
@@ -996,15 +982,11 @@ class ShareService:
                 share = await uow.shares.get_by_id(share_id)
             owner_id = share.owner_user_id if share is not None else None
         if owner_id is not None:
-            meta = (
-                await self._storage.read_meta_async(
-                    minute_token, owner_user_id=owner_id
-                )
-                or {}
+            record = await read_meeting_record(
+                minute_token, owner_user_id=owner_id
             )
-            raw = meta.get("title")
-            if raw:
-                return str(raw)
+            if record is not None and record.title:
+                return str(record.title)
         return minute_token
 
     async def log_access(

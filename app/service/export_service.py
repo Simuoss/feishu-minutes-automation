@@ -29,6 +29,17 @@ def _apply_speaker_names(
     )
 
 
+def _meeting_title(minute_token: str, *, owner_user_id: int) -> str:
+    """导出件的文件名要用会议标题；标题还没落库就退回 token。"""
+    from app.core.async_bridge import run_async
+    from app.service.metadata_db_service import read_meeting_record
+
+    record = run_async(
+        read_meeting_record(minute_token, owner_user_id=owner_user_id)
+    )
+    return (record.title if record else None) or minute_token
+
+
 class ExportService:
     def __init__(self) -> None:
         self._storage = MeetingStorageService()
@@ -46,9 +57,7 @@ class ExportService:
         content = _apply_speaker_names(
             detail["content"] or "", minute_token, owner_user_id=owner_user_id
         )
-        title = (
-            self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
-        ).get("title") or minute_token
+        title = _meeting_title(minute_token, owner_user_id=owner_user_id)
         safe = self._safe_filename(title)
         watermark = self._watermark_text()
 
@@ -86,9 +95,7 @@ class ExportService:
         )
         if text is None:
             raise LookupError("本地没有该会议的转写文本")
-        title = (
-            self._storage.read_meta(minute_token, owner_user_id=owner_user_id) or {}
-        ).get("title") or minute_token
+        title = _meeting_title(minute_token, owner_user_id=owner_user_id)
         safe = self._safe_filename(title)
 
         if fmt == "txt":

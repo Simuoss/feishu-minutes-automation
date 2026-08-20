@@ -87,7 +87,7 @@ data/meetings/{owner_user_id}/{minute_token}/
     └── summary.md
 ```
 
-会议/分享/R2 同步等元数据在 `data/app.db`，不再以目录内 `meta.json` 为权威。
+会议/分享/R2 同步等元数据在 `data/app.db`，不再以目录内 `meta.json` 为权威。业务代码一律按字段读写 `meeting_records`；`meta.json` 那种松散字典只剩迁移脚本还在用（`scripts/migrate_filesystem_meta_to_db.py`），认不出的键只能丢掉，也认不出「这个字段没提」和「把这个字段置空」的区别。
 
 本地导入的会议在飞书上没有 `minute_token`，用 `imp` + 20 位随机十六进制当标识（如 `imp3f9c…`），目录结构与飞书会议完全一致；库里的 `event_type` 记成 `LOCAL_IMPORT`，所有飞书专属操作都靠它识别并明确拒绝。
 

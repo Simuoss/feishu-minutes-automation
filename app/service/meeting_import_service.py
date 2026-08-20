@@ -15,10 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.resource_key import storage_relpath
-from app.data_model.entity.meeting_record import (
-    MeetingRecordCreateEntity,
-    MeetingRecordUpdateEntity,
-)
+from app.data_model.entity.meeting_record import MeetingRecordCreateEntity
 from app.integrations.video.ffmpeg_client import FfmpegError, ffmpeg_client
 from app.repository.uow import UnitOfWork
 from app.service.document_transcript import (
@@ -218,8 +215,6 @@ class MeetingImportService:
         # 稳定事件键，与手动下载同款写法
         event_id = f"import-{minute_token}:u{owner_user_id}"
 
-        # 先建记录再写 meta：meta 现在也落在 meeting_records 上，反过来会先由
-        # META_BACKFILL 占掉这一行，随后建记录就撞 feishu_event_id 的唯一约束
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
             record = await uow.meeting_records.create(
@@ -227,51 +222,27 @@ class MeetingImportService:
                     feishu_event_id=event_id,
                     event_type=LOCAL_IMPORT_EVENT_TYPE,
                     minute_token=minute_token,
+                    title=title,
+                    duration_ms=duration_ms,
+                    has_video=has_video,
                     # 必须是 COMPLETED，否则 assert_meeting_readable 会让详情全 404
                     status="COMPLETED",
                     storage_path=str(base_dir),
                     owner_user_id=owner_user_id,
-                    storage_root_relpath=rel,
-                )
-            )
-            if record.id is None:
-                raise MeetingImportError("创建会议记录失败，未返回 record id")
-            await uow.meeting_records.update(
-                MeetingRecordUpdateEntity(
-                    id=record.id,
-                    title=title,
-                    duration_ms=duration_ms,
-                    has_video=has_video,
-                    status="COMPLETED",
                     media_relpath=str(media_path) if media_path else None,
                     transcript_relpath=(
                         str(transcript_path) if transcript_path else None
                     ),
-                    transcript_source=transcript_source,
+                    downloaded_at=int(now.timestamp() * 1000),
+                    storage_root_relpath=rel,
                     speakers_json=json.dumps(speakers, ensure_ascii=False),
                     create_time=now.isoformat(),
+                    transcript_source=transcript_source,
                 )
             )
+            if record.id is None:
+                raise MeetingImportError("创建会议记录失败，未返回 record id")
             await uow.commit()
-
-        await self._storage.write_meta_async(
-            minute_token,
-            {
-                "minute_token": minute_token,
-                "title": title,
-                "duration_ms": duration_ms,
-                "create_time": now.isoformat(),
-                "has_video": has_video,
-                "feishu_event_id": event_id,
-                "downloaded_at": now.isoformat(),
-                "status": "COMPLETED",
-                "files": {
-                    "media": str(media_path) if media_path else None,
-                    "transcript": str(transcript_path) if transcript_path else None,
-                },
-            },
-            owner_user_id=owner_user_id,
-        )
         return record.id
 
 

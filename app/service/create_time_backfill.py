@@ -72,7 +72,7 @@ async def backfill_missing_create_times(*, limit: int = 200) -> int:
 
     async def _fill(owner: int, token: str) -> bool:
         from app.integrations.feishu.minutes_client import FeishuMinutesClient
-        from app.service.meeting_storage_service import MeetingStorageService
+        from app.service.metadata_db_service import set_meeting_create_time
 
         async with semaphore:
             try:
@@ -90,11 +90,9 @@ async def backfill_missing_create_times(*, limit: int = 200) -> int:
             create_time = str(info.create_time or "").strip()
             if not create_time:
                 return False
-            storage = MeetingStorageService()
-            meta = await storage.read_meta_async(token, owner_user_id=owner) or {}
-            meta["create_time"] = create_time
-            await storage.write_meta_async(token, meta, owner_user_id=owner)
-            return True
+            return await set_meeting_create_time(
+                token, create_time, owner_user_id=owner
+            )
 
     results = await asyncio.gather(
         *(_fill(owner, token) for owner, token in targets),

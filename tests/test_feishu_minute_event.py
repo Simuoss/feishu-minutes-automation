@@ -236,7 +236,6 @@ def _patch_download_uow(
             return None
 
     monkeypatch.setattr("app.service.meeting_download_service.UnitOfWork", lambda: StubUow())
-    monkeypatch.setattr(service._storage, "is_persisted", lambda _token: False)
 
 
 def test_download_retries_when_minute_not_ready(monkeypatch: Any) -> None:

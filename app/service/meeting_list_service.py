@@ -305,7 +305,7 @@ class MeetingListService:
             "has_video": detail.get("has_video"),
             "media_files": media_files,
             "has_transcript": bool(detail.get("has_transcript")),
-            "downloaded_at": detail.get("meta", {}).get("downloaded_at"),
+            "downloaded_at": detail.get("downloaded_at"),
         }
 
     async def get_local_meeting_async(
