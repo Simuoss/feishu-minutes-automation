@@ -238,13 +238,42 @@ R2 每月约有 **10GB 存储** 与读写操作免费额度（以官网为准）
 
 ### 所需权限
 
+开发者后台 → 开发配置 → **权限管理**，用页面上的 JSON 批量导入把这份粘进去（也可以照着名字逐个勾）：
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "wiki:wiki"
+    ],
+    "user": [
+      "minutes:minutes",
+      "minutes:minutes.basic:read",
+      "minutes:minutes.media:export",
+      "minutes:minutes.search:read",
+      "minutes:minutes.transcript:export",
+      "minutes:minutes:readonly",
+      "offline_access",
+      "vc:meeting.meetingevent:read",
+      "vc:recording:read"
+    ]
+  }
+}
+```
+
+改完记得**发布版本**，权限才对线上生效。其中当前代码真正用到的是这几项：
+
 | 权限 | 用途 |
 |------|------|
 | `minutes:minutes.basic:read` | 妙记基本信息 + 订阅生成事件 |
 | `minutes:minutes.search:read` | 搜索云端列表 |
 | `minutes:minutes.media:export` | 下载音视频 |
 | `minutes:minutes.transcript:export` | 导出转写 |
-| `offline_access` | 刷新用户授权 |
+| `offline_access` | 刷新用户授权，免得每次都要重新登录 |
+
+剩下几项是留着的：`minutes:minutes` 与 `minutes:minutes:readonly` 是妙记的粗粒度父权限，后台勾细项时常一并开上；`vc:recording:read`、`vc:meeting.meetingevent:read` 对应会议录制那条入口（`FeishuVcClient` 已经封好了取录制文件的接口，但当前流程不走它，`vc.recording.*` 事件也是明确忽略的）；`wiki:wiki` 是租户级，代码目前不碰知识库接口。开着不影响，将来要用不必再回后台改一遍。
+
+发起授权时实际申请哪些，由 `.env` 的 `FEISHU_OAUTH_SCOPES` 决定（默认就是上表那五项，空格分隔）。这里写了但后台没开通的，登录后前端会顶出「缺少权限」横幅，点横幅上的链接去后台补；反过来后台开了但这里没写的，就只是不申请而已。租户级权限（`wiki:wiki`）不属于用户授权，别往这个变量里塞。
 
 ### 用户 OAuth / SSO
 
