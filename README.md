@@ -102,7 +102,7 @@ SPEAKER_EMBEDDING_MODEL_PATH=models/3dspeaker_speech_campplus_sv_zh-cn_16k-commo
   - 其余 → `http://127.0.0.1:7355`  
 - 本地：`python frontend/serve.py` 已反代 `/api/*` → 7354
 
-示例 ingress 见 [`cloudflared.ingress.example.yml`](cloudflared.ingress.example.yml)。浏览器直连 R2 时需桶 CORS 允许前端 Origin，且本地导入的直传要求方法里带 `PUT`（可参考 [`scripts/r2_browser_cors.example.json`](scripts/r2_browser_cors.example.json)，按实际域名改后下发到桶）。
+示例 ingress 见 [`cloudflared.ingress.example.yml`](cloudflared.ingress.example.yml)。开了 R2 的话，桶还要配 CORS，见下面 [R2 桶 CORS](#3-桶-cors浏览器要直接连-r2)。
 
 ### A. Cloudflare Tunnel（公网入口）
 
@@ -178,7 +178,40 @@ R2_BUCKET=larkmeeting-share
 
 哪些对象会上云、不开 R2 会退化成什么样，见 [媒体存储与 R2](docs/media-storage.md)。
 
-#### 3. 历史数据补传 / 清本地
+#### 3. 桶 CORS（浏览器要直接连 R2）
+
+配图和分享片是浏览器拿签名 URL 直接从 R2 读的，本地导入的大文件又是浏览器直接 `PUT` 上去的，这两件事都要桶放开 CORS，否则被浏览器挡在预检那一步。
+
+服务启动时会自己试一次：读桶上现有规则，够用就跳过，不够用才写。但 R2 API Token 默认没有读写 CORS 的权限，这时程序只在日志里说一句「沿用控制台手配规则」就过去了——所以通常还是得去控制台手配一次。
+
+Dashboard → R2 → 选桶 → **Settings** → **CORS Policy** → Edit，把这段按自己的域名改完粘进去（[`scripts/r2_browser_cors.example.json`](scripts/r2_browser_cors.example.json) 是同一份，可直接复制）：
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "https://larkmeeting.example.com",
+      "http://127.0.0.1:7355",
+      "http://localhost:7355"
+    ],
+    "AllowedMethods": ["GET", "HEAD", "PUT"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+几处别改错：
+
+- **`AllowedOrigins` 填页面的域名，不是 R2 的域名。** 也就是 `.env` 里的 `FRONTEND_ORIGIN`；本机调试的 `127.0.0.1:7355` 和 `localhost:7355` 是两个不同的 Origin，都要写上，端口也算在内。
+- **`PUT` 是本地导入直传要用的。** 只放 `GET`/`HEAD` 的话，看图和播放正常，但导入大文件时预检会被挡；这种情况下一个字节都还没发出去，前端会静默改走服务器上传（走 Tunnel，几百兆会慢），功能不至于坏掉。
+- **`ExposeHeaders` 是「允许页面上的 JS 读到这几个响应头」。** 跨域响应里其余的头浏览器会藏起来，即使真的返回了也读不到。当前是整文件一次 `PUT`，前端不读 `ETag`，传完只告诉后端一声、由后端去 R2 把对象拉回来；照抄留着是因为 S3 直传惯例如此，且将来要做分片上传就必须有——每片的 `ETag` 得回传给合并请求，缺了就传不完。
+- `MaxAgeSeconds` 是预检结果的缓存时间，一小时够了；调小只是多几次 `OPTIONS` 往返。
+
+改完不用重启后端，浏览器侧刷新页面即可（旧的预检结果可能还在缓存里，等一会儿或换个无痕窗口）。想确认有没有生效，启动日志里会有一行：覆盖到了写「R2 桶 CORS 已覆盖前端 Origin」，只放开了读会明确警告 PUT 没放开。
+
+#### 4. 历史数据补传 / 清本地
 
 ```bash
 set PYTHONPATH=.
@@ -189,7 +222,7 @@ set PYTHONPATH=.
 .\.venv\Scripts\python.exe scripts\purge_local_media_after_r2.py
 ```
 
-#### 4. 免费额度提示
+#### 5. 免费额度提示
 
 R2 每月约有 **10GB 存储** 与读写操作免费额度（以官网为准）。压缩后体积远小于原片，建议只长期存分享链路所需对象。
 
@@ -197,8 +230,7 @@ R2 每月约有 **10GB 存储** 与读写操作免费额度（以官网为准）
 
 1. Tunnel 服务 Running；同域 `/api*`→7354、其余→7355  
 2. `FRONTEND_ORIGIN` / `API_PUBLIC_BASE` 为同一公网域名  
-3. 需要媒体加速：`R2_ENABLED=true`，桶 CORS 允许前端 Origin，重启后端  
-   本地导入要用直传的话，CORS 的 `AllowedMethods` 里还得有 `PUT`；当前 R2 API Token 一般没有 `PutBucketCors` 权限，程序改不了，得在 Cloudflare 控制台手配。没配也能用，只是会退回服务器上传  
+3. 需要媒体加速：`R2_ENABLED=true`、密钥齐全、重启后端；桶 CORS 按 [上面那节](#3-桶-cors浏览器要直接连-r2) 配好，`AllowedOrigins` 覆盖前端域名、方法里有 `PUT`、暴露 `ETag`  
 4. 分享页配图 401：确认已拿到访问票再渲染纪要（当前前端会先取票）  
 5. 本机管理用 `127.0.0.1:7355`，Network 里 API 走同域 `/api/v1`
 
