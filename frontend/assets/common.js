@@ -660,8 +660,8 @@ async function apiFetch(path, options = {}) {
   return res;
 }
 
-async function downloadWithAuth(path, filenameHint) {
-  const res = await apiFetch(path);
+async function downloadWithAuth(path, filenameHint, options = {}) {
+  const res = await apiFetch(path, options);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || res.statusText);

@@ -95,6 +95,7 @@
           <button id="batch-summary-btn" class="btn" type="button" disabled><i class="ri ri-article-line" aria-hidden="true"></i><span class="btn-label">生成纪要</span></button>
           <button id="catchup-summary-btn" class="btn" type="button" disabled><i class="ri ri-restart-line" aria-hidden="true"></i><span class="btn-label">补跑未生成</span></button>
           <button id="share-selected-btn" class="btn" type="button" disabled><i class="ri ri-share-forward-line" aria-hidden="true"></i><span class="btn-label">分享选中</span></button>
+          <button id="export-selected-btn" class="btn" type="button" disabled><i class="ri ri-file-zip-line" aria-hidden="true"></i><span class="btn-label">导出选中</span></button>
           <button id="import-btn" class="btn" type="button"><i class="ri ri-upload-2-line" aria-hidden="true"></i><span class="btn-label">导入本地文件</span></button>
         </div>
         <div class="actions-right">
@@ -192,6 +193,44 @@
     </div>
   </div>
 
+  <div id="export-batch-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="export-batch-title">
+    <div class="modal-backdrop" data-close-dialog></div>
+    <div class="modal-card">
+      <h3 id="export-batch-title" class="modal-title">导出选中会议</h3>
+      <p id="export-batch-msg" class="modal-msg"></p>
+      <div class="filter-grid">
+        <label class="field field-wide modal-check">
+          <input id="export-include-summary" type="checkbox" checked />
+          <span>纪要</span>
+        </label>
+        <label class="field">
+          <span>纪要格式</span>
+          <select id="export-summary-format">
+            <option value="md" selected>Markdown</option>
+            <option value="docx">Word</option>
+            <option value="pdf">PDF</option>
+          </select>
+        </label>
+        <label class="field field-wide modal-check">
+          <input id="export-include-transcript" type="checkbox" checked />
+          <span>转写</span>
+        </label>
+        <label class="field">
+          <span>转写格式</span>
+          <select id="export-transcript-format">
+            <option value="txt" selected>TXT</option>
+            <option value="md">Markdown</option>
+          </select>
+        </label>
+      </div>
+      <p class="modal-hint">打成一个 zip，按会议名命名。没有纪要或转写的场次会写进包里的跳过清单。一次最多 50 场；PDF / Word 选多了会比较慢。</p>
+      <div class="modal-actions">
+        <button id="export-batch-confirm" class="btn btn-primary" type="button"><i class="ri ri-file-zip-line" aria-hidden="true"></i><span class="btn-label">下载 zip</span></button>
+        <button id="export-batch-cancel" class="btn" type="button" data-close-dialog><i class="ri ri-close-line" aria-hidden="true"></i><span class="btn-label">取消</span></button>
+      </div>
+    </div>
+  </div>
+
   <div id="share-batch-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="share-batch-title">
     <div class="modal-backdrop" data-close-dialog></div>
     <div class="modal-card">
@@ -237,9 +276,9 @@
   </div>
 
   <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
-  <script defer src="/assets/common.js?v=20260816-no-r2-text"></script>
+  <script defer src="/assets/common.js?v=20260824-batch-export"></script>
   <script defer src="/assets/admin-shell.js?v=20260821-agent"></script>
   <script defer src="/assets/vendor/qrcode.min.js"></script>
-  <script defer src="/assets/list.js?v=20260820-import-fallback"></script>
+  <script defer src="/assets/list.js?v=20260824-batch-export"></script>
 </body>
 </html>

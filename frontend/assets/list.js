@@ -758,6 +758,8 @@ function updateDownloadBtn() {
   if (catchupBtn) catchupBtn.disabled = missingSummaryLocals().length === 0;
   const shareBtn = $("#share-selected-btn");
   if (shareBtn) shareBtn.disabled = locals.length === 0;
+  const exportBtn = $("#export-selected-btn");
+  if (exportBtn) exportBtn.disabled = locals.length === 0;
   updateSelectAllBtnLabel();
 }
 
@@ -1577,6 +1579,60 @@ function closeShareBatchDialog() {
   $("#share-batch-dialog").classList.add("hidden");
 }
 
+const EXPORT_BATCH_LIMIT = 50;
+
+function closeExportBatchDialog() {
+  $("#export-batch-dialog")?.classList.add("hidden");
+}
+
+function exportSelected() {
+  const items = selectedLocalItems();
+  if (!items.length) {
+    setStatus("请先选中已下载到本地的会议");
+    return;
+  }
+  const capped = items.length > EXPORT_BATCH_LIMIT;
+  const shown = capped ? EXPORT_BATCH_LIMIT : items.length;
+  $("#export-batch-msg").textContent = capped
+    ? `已选 ${items.length} 场，一次最多 ${EXPORT_BATCH_LIMIT} 场，将导出前 ${shown} 场。`
+    : `将导出已选中的 ${shown} 场本地会议。`;
+  $("#export-batch-dialog").classList.remove("hidden");
+}
+
+async function confirmExportSelected() {
+  const items = selectedLocalItems().slice(0, EXPORT_BATCH_LIMIT);
+  const include_summary = $("#export-include-summary")?.checked ?? true;
+  const include_transcript = $("#export-include-transcript")?.checked ?? true;
+  if (!include_summary && !include_transcript) {
+    setStatus("至少勾选纪要或转写其中一项");
+    return;
+  }
+  closeExportBatchDialog();
+  const btn = $("#export-selected-btn");
+  if (btn) btn.disabled = true;
+  try {
+    setStatus(`正在打包 ${items.length} 场会议…`);
+    await downloadWithAuth("/meetings/export/batch", "会议导出.zip", {
+      method: "POST",
+      body: JSON.stringify({
+        items: items.map((item) => ({
+          minute_token: item.minute_token,
+          owner_user_id: ownerUserIdFromItem(item),
+        })),
+        include_summary,
+        include_transcript,
+        summary_format: $("#export-summary-format")?.value || "md",
+        transcript_format: $("#export-transcript-format")?.value || "txt",
+      }),
+    });
+    setStatus(`已导出 ${items.length} 场会议`);
+  } catch (err) {
+    setStatus(err.message || "导出失败");
+  } finally {
+    updateDownloadBtn();
+  }
+}
+
 async function openShareBatchDialog(items) {
   $("#share-batch-msg").textContent = `将为已选中的 ${items.length} 个本地会议创建/复用分享链接。`;
   await loadShareBatchKeyOptions();
@@ -1759,6 +1815,11 @@ $("#download-btn").addEventListener("click", downloadSelected);
 $("#batch-summary-btn").addEventListener("click", batchGenerateSummaries);
 $("#catchup-summary-btn")?.addEventListener("click", catchupMissingSummaries);
 $("#share-selected-btn").addEventListener("click", shareSelected);
+$("#export-selected-btn")?.addEventListener("click", exportSelected);
+$("#export-batch-confirm")?.addEventListener("click", confirmExportSelected);
+$("#export-batch-dialog")?.addEventListener("click", (e) => {
+  if (e.target.closest("[data-close-dialog]")) closeExportBatchDialog();
+});
 $("#share-batch-access-mode").addEventListener("change", syncShareBatchModeUi);
 $("#share-batch-confirm").addEventListener("click", confirmShareSelected);
 $("#share-batch-dialog").addEventListener("click", (e) => {
@@ -1825,6 +1886,10 @@ document.addEventListener("keydown", (e) => {
   }
   if (!$("#share-batch-dialog").classList.contains("hidden")) {
     closeShareBatchDialog();
+    return;
+  }
+  if (!$("#export-batch-dialog")?.classList.contains("hidden")) {
+    closeExportBatchDialog();
   }
 });
 

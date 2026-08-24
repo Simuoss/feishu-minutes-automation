@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import logging
 import re
+import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from app.core import runtime_config
@@ -104,6 +106,91 @@ class ExportService:
             md = f"# {title}\n\n```\n{text.rstrip()}\n```\n"
             return md.encode("utf-8"), f"{safe}-transcript.md", "text/markdown; charset=utf-8"
         raise ValueError("转写导出格式仅支持 md / txt")
+
+    def export_batch(
+        self,
+        items: list[tuple[str, int]],
+        *,
+        include_summary: bool,
+        include_transcript: bool,
+        summary_format: str = "md",
+        transcript_format: str = "txt",
+    ) -> tuple[bytes, str]:
+        """把多场会议的纪要/转写打成一个 zip。
+
+        items 是已经鉴权过的 (token, owner) 列表。缺文件的场次写进 _跳过.txt，
+        不让整包失败。包里的文件名尽量保留中文会议名。
+        """
+        if not include_summary and not include_transcript:
+            raise ValueError("至少勾选纪要或转写其中一项")
+        if not items:
+            raise ValueError("没有可导出的会议")
+
+        used: set[str] = set()
+        skipped: list[str] = []
+        packed = 0
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for token, owner_id in items:
+                title = _meeting_title(token, owner_user_id=owner_id)
+                if include_summary:
+                    packed += self._write_one(
+                        zf,
+                        used,
+                        skipped,
+                        title,
+                        kind="纪要",
+                        exporter=lambda t=token, o=owner_id: self.export_summary(
+                            t, summary_format, owner_user_id=o
+                        ),
+                    )
+                if include_transcript:
+                    packed += self._write_one(
+                        zf,
+                        used,
+                        skipped,
+                        title,
+                        kind="转写",
+                        exporter=lambda t=token, o=owner_id: self.export_transcript(
+                            t, transcript_format, owner_user_id=o
+                        ),
+                    )
+            if skipped:
+                zf.writestr(
+                    "_跳过.txt",
+                    "跳过 {} 项：\n{}\n".format(len(skipped), "\n".join(skipped)),
+                )
+
+        if packed <= 0:
+            raise LookupError("选中的会议里没有可导出的纪要或转写")
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        return buffer.getvalue(), f"会议导出-{stamp}.zip"
+
+    def _write_one(
+        self,
+        zf: zipfile.ZipFile,
+        used: set[str],
+        skipped: list[str],
+        title: str,
+        *,
+        kind: str,
+        exporter,
+    ) -> int:
+        try:
+            data, filename, _media = exporter()
+        except LookupError as exc:
+            skipped.append(f"{title}：{exc}")
+            return 0
+        except Exception as exc:  # noqa: BLE001 — 单场失败不拖整包
+            logger.error("批量导出失败 title=%s kind=%s：%s", title, kind, exc)
+            skipped.append(f"{title}：{kind}导出失败")
+            return 0
+        # 单场导出的文件名是 ASCII，zip 里改回中文会议名，后缀跟着原文件走
+        suffix = Path(filename).suffix or ""
+        entry = _zip_entry_name(title, f"-{kind}{suffix}", used)
+        zf.writestr(entry, data)
+        return 1
 
     @staticmethod
     def _watermark_text() -> str:
@@ -292,6 +379,19 @@ code {{ font-family: Consolas, monospace; }}
         cleaned = re.sub(r"[^\w.\-]+", "_", name, flags=re.UNICODE).strip("._") or "export"
         ascii_name = cleaned.encode("ascii", "ignore").decode("ascii").strip("._")
         return (ascii_name or "export")[:80]
+
+
+def _zip_entry_name(title: str, suffix: str, used: set[str]) -> str:
+    """zip 里可以带中文。只去掉路径分隔符，撞名就加 (2)。"""
+    cleaned = re.sub(r"[/\\:\0]+", "_", (title or "").strip()) or "未命名会议"
+    cleaned = cleaned.strip(" .")[:80] or "未命名会议"
+    name = f"{cleaned}{suffix}"
+    index = 2
+    while name in used:
+        name = f"{cleaned} ({index}){suffix}"
+        index += 1
+    used.add(name)
+    return name
 
 
 def _escape_html(text: str) -> str:
