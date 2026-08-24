@@ -20,5 +20,8 @@ xhtml2pdf>=0.2.11
 # Cloudflare R2（S3 兼容）
 aioboto3>=13.0.0
 
+# 检索助手；自带原生二进制，不需要 Node
+claude-agent-sdk>=0.2.140
+
 # 开发依赖
 pytest>=8.0.0

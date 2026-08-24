@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.routes import (
     access_keys,
     admin_system_configs,
+    agent,
     admin_users,
     admin_voiceprints,
     auth,
@@ -24,6 +25,8 @@ api_router.include_router(access_keys.router)
 api_router.include_router(admin_users.router)
 api_router.include_router(admin_system_configs.router)
 api_router.include_router(admin_voiceprints.router)
+# agent 在前：/share/agent/... 要先于 /share/{share_token}/... 参与匹配
+api_router.include_router(agent.router)
 api_router.include_router(shares.guest_router)
 api_router.include_router(imports.router)
 # meetings 在前：/meetings/local/{token} 需先于 /meetings/{token}/summary 参与匹配

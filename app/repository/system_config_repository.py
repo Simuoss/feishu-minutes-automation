@@ -74,6 +74,14 @@ class SystemConfigRepository:
         await self._session.refresh(orm)
         return _to_entity(orm)
 
+    async def delete(self, key: str) -> bool:
+        orm = await self._session.get(SystemConfigORM, key)
+        if orm is None:
+            return False
+        await self._session.delete(orm)
+        await self._session.flush()
+        return True
+
     async def ensure_defaults(
         self, defaults: list[SystemConfigCreateEntity]
     ) -> list[SystemConfigEntity]:

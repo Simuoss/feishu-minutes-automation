@@ -10,6 +10,7 @@ from app.api.router import api_router
 from app.core.admin_auth import AdminAuthMiddleware
 from app.core.config import settings
 from app.core.database import init_db
+from app.core.llm_stages import log_llm_wiring
 from app.core.logging import setup_logging
 from app.integrations.feishu.ws_client import FeishuWsClientRunner
 from app.service.minute_subscription_service import ensure_minute_generated_subscription
@@ -29,6 +30,7 @@ async def _run_create_time_backfill(backfill) -> None:
 async def lifespan(_app: FastAPI):
     global _ws_runner
     setup_logging(debug=settings.app_debug)
+    log_llm_wiring()
     await init_db()
     from app.service.system_config_service import system_config_service
 

@@ -1,4 +1,26 @@
+from dataclasses import dataclass
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass(frozen=True)
+class LlmEndpoint:
+    """一个环节的模型出处。
+
+    三件套绑在一起取：换供应商时地址、密钥、模型名必须同时换，分开读容易出现
+    「拿 A 家的密钥打 B 家的地址」。overridden 记下哪几样是这个环节自己填的，
+    启动时用来打分工表，也用来发现只填了一半的配置。
+    """
+
+    stage: str
+    base_url: str
+    api_key: str
+    model: str
+    overridden: frozenset[str]
+
+    @property
+    def is_default(self) -> bool:
+        return not self.overridden
 
 
 class Settings(BaseSettings):
@@ -49,12 +71,35 @@ class Settings(BaseSettings):
     # 飞书 SSO 建号是否强制邀请码（当前默认关闭，预留开关）
     feishu_sso_require_invite: bool = False
 
+    # 兜底的一组：下面各环节没自己填的项都回落到这里
     # step-explore 走 Step Plan 通道；SDK/自拼路径都会再接 /v1/messages
     llm_base_url: str = "https://api.stepfun.com/step_plan"
     llm_api_key: str = ""
     llm_model: str = "step-explore"
-    # 场景判定是一次轻量分类，用快模型省掉主模型动辄数分钟的排队；留空则回落到 llm_model
+
+    # ---------- 各环节的模型出处 ----------
+    # 每个环节一组 BASE_URL / API_KEY / MODEL，逐项留空则回落到上面那组。
+    # 只想换模型就只填 MODEL；整个环节换供应商要三样一起填。
+    # 纪要成文：整篇转写进去、成篇 markdown 出来，长上下文长输出，全站最贵的一步
+    llm_summary_base_url: str = ""
+    llm_summary_api_key: str = ""
+    llm_summary_model: str = ""
+    # 挑图：一次几十张候选帧进去，回一小段 JSON，必须能看图
+    llm_figure_base_url: str = ""
+    llm_figure_api_key: str = ""
+    llm_figure_model: str = ""
+    # 配图脱敏：扫敏感信息再复核马赛克，同样必须能看图
+    llm_redact_base_url: str = ""
+    llm_redact_api_key: str = ""
+    llm_redact_model: str = ""
+    # 场景判定：一次短分类，用快模型省掉主模型动辄数分钟的排队
+    llm_scene_base_url: str = ""
+    llm_scene_api_key: str = ""
     llm_scene_model: str = "step-3.7-flash"
+    # 划词答疑：短问快答，可能带用户贴的图
+    llm_ask_base_url: str = ""
+    llm_ask_api_key: str = ""
+    llm_ask_model: str = ""
 
     # 自建转写：文件异步接口在 /v1 下，与 step_plan 通道不是同一个前缀
     step_asr_base_url: str = "https://api.stepfun.com"
@@ -151,6 +196,111 @@ class Settings(BaseSettings):
 
     # 导出 PDF/DOCX 水印文案；空字符串表示不加水印
     export_watermark_text: str = ""
+
+    # 检索助手（Claude Agent SDK）。三件套同样留空则回落默认那组
+    agent_enabled: bool = True
+    agent_base_url: str = ""
+    agent_api_key: str = ""
+    agent_model: str = ""
+    # 一轮问答里允许的工具往返次数
+    agent_max_turns: int = 24
+    # 同时在跑的 Agent 会话数；每个会话是一个 CLI 子进程
+    agent_concurrency: int = 4
+    # 每日提问上限，0 表示不限
+    agent_daily_quota_anon: int = 20
+    agent_daily_quota_key: int = 0
+    agent_daily_quota_user: int = 0
+    # search 单次最多返回多少条命中
+    agent_search_max_results: int = 50
+
+    def _stage_llm(
+        self, stage: str, base_url: str, api_key: str, model: str
+    ) -> LlmEndpoint:
+        raw = {"base_url": base_url, "api_key": api_key, "model": model}
+        return LlmEndpoint(
+            stage=stage,
+            base_url=(base_url.strip() or self.llm_base_url).rstrip("/"),
+            api_key=api_key.strip() or self.llm_api_key,
+            model=model.strip() or self.llm_model,
+            overridden=frozenset(name for name, value in raw.items() if value.strip()),
+        )
+
+    @property
+    def default_llm(self) -> LlmEndpoint:
+        """兜底那组。没自己填三件套的环节都落到这里。"""
+        return LlmEndpoint(
+            stage="兜底默认",
+            base_url=self.llm_base_url.rstrip("/"),
+            api_key=self.llm_api_key,
+            model=self.llm_model,
+            overridden=frozenset(),
+        )
+
+    @property
+    def summary_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "纪要成文",
+            self.llm_summary_base_url,
+            self.llm_summary_api_key,
+            self.llm_summary_model,
+        )
+
+    @property
+    def figure_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "挑图",
+            self.llm_figure_base_url,
+            self.llm_figure_api_key,
+            self.llm_figure_model,
+        )
+
+    @property
+    def redact_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "配图脱敏",
+            self.llm_redact_base_url,
+            self.llm_redact_api_key,
+            self.llm_redact_model,
+        )
+
+    @property
+    def scene_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "场景判定",
+            self.llm_scene_base_url,
+            self.llm_scene_api_key,
+            self.llm_scene_model,
+        )
+
+    @property
+    def ask_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "划词答疑",
+            self.llm_ask_base_url,
+            self.llm_ask_api_key,
+            self.llm_ask_model,
+        )
+
+    @property
+    def agent_llm(self) -> LlmEndpoint:
+        return self._stage_llm(
+            "检索助手",
+            self.agent_base_url,
+            self.agent_api_key,
+            self.agent_model,
+        )
+
+    def llm_endpoints(self) -> list[LlmEndpoint]:
+        """七组模型出处，顺序即启动日志里打的分工表。"""
+        return [
+            self.default_llm,
+            self.summary_llm,
+            self.figure_llm,
+            self.redact_llm,
+            self.scene_llm,
+            self.ask_llm,
+            self.agent_llm,
+        ]
 
     @property
     def r2_endpoint(self) -> str:

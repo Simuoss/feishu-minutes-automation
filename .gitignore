@@ -26,6 +26,7 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/meetings/
+data/agent_sessions/
 data/_probe_frames/
 data/_dedup_probe/
 data/_*/

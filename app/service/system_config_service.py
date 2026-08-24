@@ -20,6 +20,12 @@ def _bool_str(value: bool) -> str:
     return "true" if value else "false"
 
 
+# 曾经进过配置表、现在只认 .env 的键。留着行会在配置页上显示成一个改了不生效的开关，
+# 所以启动时删掉。模型三件套（地址/密钥/模型名）必须一起改，热改单个模型名太容易改出
+# 「A 家的密钥打 B 家的地址」，因此整组挪回 .env。
+RETIRED_KEYS = ("LLM_SUMMARY_MODEL", "AGENT_MODEL")
+
+
 def default_catalog() -> list[SystemConfigCreateEntity]:
     """业务可选项目录；首次启动按 Settings 种子，之后以库为准。"""
     return [
@@ -275,6 +281,48 @@ def default_catalog() -> list[SystemConfigCreateEntity]:
             value=str(settings.export_watermark_text or ""),
             remark="仅作用于纪要 PDF/DOCX；转写 md/txt 不加",
         ),
+        SystemConfigCreateEntity(
+            key="AGENT_ENABLED",
+            description="检索助手总开关",
+            value=_bool_str(settings.agent_enabled),
+            remark="关掉后管理端与分享页的入口都不再受理请求",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_MAX_TURNS",
+            description="一轮问答里允许的工具往返次数",
+            value=str(settings.agent_max_turns),
+            remark="调小能压成本，但复杂检索可能查不完就被掐断",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_CONCURRENCY",
+            description="同时在跑的检索助手会话数",
+            value=str(settings.agent_concurrency),
+            remark="每个会话是一个 CLI 子进程，吃内存；修改后需重启后端",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_DAILY_QUOTA_ANON",
+            description="公开访客每日提问上限（0=不限）",
+            value=str(settings.agent_daily_quota_anon),
+            remark="按分享会话+IP 计数，防止公开链接被薅",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_DAILY_QUOTA_KEY",
+            description="密钥访客每日提问上限（0=不限）",
+            value=str(settings.agent_daily_quota_key),
+            remark="按该访客手上全部可用密钥算一个主体",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_DAILY_QUOTA_USER",
+            description="登录用户每日提问上限（0=不限）",
+            value=str(settings.agent_daily_quota_user),
+            remark="",
+        ),
+        SystemConfigCreateEntity(
+            key="AGENT_SEARCH_MAX_RESULTS",
+            description="检索助手单次检索最多返回多少条命中",
+            value=str(settings.agent_search_max_results),
+            remark="太大会把模型上下文顶满",
+        ),
     ]
 
 
@@ -302,6 +350,9 @@ class SystemConfigService:
                         "已将 LLM_CONCURRENCY 从历史默认 4 提升为 %s（全局大模型调用池）",
                         settings.llm_concurrency,
                     )
+            for key in RETIRED_KEYS:
+                if await uow.system_configs.delete(key):
+                    logger.info("配置项 %s 已下线，改到 .env 里配（模型三件套要一起改）", key)
             await uow.commit()
             items = await uow.system_configs.list_all()
         runtime_config.replace_cache({row.key: row.value for row in items})

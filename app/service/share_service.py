@@ -708,6 +708,7 @@ class ShareService:
 
         key_id_to_prefix: dict[int, str] = {}
         usable_key_ids: list[int] = []
+        usable_key_hashes: list[str] = []
         hashes = [hash_access_key(k) for k in cleaned_keys]
 
         async with UnitOfWork() as uow:
@@ -744,6 +745,7 @@ class ShareService:
                     )
                     continue
                 usable_key_ids.append(key.id)
+                usable_key_hashes.append(digest)
                 key_id_to_prefix[key.id] = key.key_prefix
                 pending_statuses.append(
                     ShareLibraryKeyStatusEntity(
@@ -827,6 +829,7 @@ class ShareService:
                 source=source,
                 duration_ms=duration_ms,
                 create_time=resolved_create,
+                owner_user_id=share.owner_user_id,
             )
 
         async def _ensure_create_time(
@@ -911,7 +914,9 @@ class ShareService:
             return (-ts, (item.title or "").lower(), item.share_token)
 
         items = sorted(items_by_token.values(), key=_library_sort_key)
-        return ShareLibraryResultEntity(items=items, keys=key_statuses)
+        return ShareLibraryResultEntity(
+            items=items, keys=key_statuses, usable_key_hashes=usable_key_hashes
+        )
 
     async def resolve_access(
         self,

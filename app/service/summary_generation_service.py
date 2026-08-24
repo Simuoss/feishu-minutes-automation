@@ -87,14 +87,20 @@ class SummaryGenerationService:
         ffmpeg: FfmpegClient | None = None,
     ) -> None:
         self._storage = storage or MeetingStorageService()
-        self._llm = llm or AnthropicMessagesClient()
         self._pool = pool or summary_generation_pool
-        self._illustration = SummaryIllustrationService(self._llm, ffmpeg or ffmpeg_client)
-        self._redaction = FigureRedactionService(self._llm)
-        # 判定只是一次短分类，独立走快模型；调用方注入了客户端时（测试、替换实现）沿用注入的那个
+        # 四个环节各走自己那组模型出处（见 Settings 的 *_llm）：成文吃长上下文，
+        # 挑图和脱敏是看图出 JSON，判定是一次短分类，负载差得远，供应商也可能不同。
+        # 调用方注入了客户端时（测试、替换实现）四处都沿用注入的那个。
+        self._llm = llm or AnthropicMessagesClient.for_stage(settings.summary_llm)
+        self._illustration = SummaryIllustrationService(
+            llm or AnthropicMessagesClient.for_stage(settings.figure_llm),
+            ffmpeg or ffmpeg_client,
+        )
+        self._redaction = FigureRedactionService(
+            llm or AnthropicMessagesClient.for_stage(settings.redact_llm)
+        )
         self._scene_detector = SceneDetector(
-            llm
-            or AnthropicMessagesClient(model=settings.llm_scene_model or settings.llm_model)
+            llm or AnthropicMessagesClient.for_stage(settings.scene_llm)
         )
 
     async def generate(
@@ -611,7 +617,7 @@ class SummaryGenerationService:
         meta = {
             "minute_token": minute_token,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "model": settings.llm_model,
+            "model": settings.summary_llm.model,
             "input_tokens": completion.input_tokens,
             "output_tokens": completion.output_tokens,
             "attempts": completion.attempts,

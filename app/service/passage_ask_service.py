@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
+from app.core.config import settings
 from app.integrations.llm.messages_client import (
     AnthropicMessagesClient,
     LlmImage,
@@ -53,7 +54,7 @@ class _PreparedAsk:
 class PassageAskService:
     def __init__(self) -> None:
         self._storage = MeetingStorageService()
-        self._llm = AnthropicMessagesClient()
+        self._llm = AnthropicMessagesClient.for_stage(settings.ask_llm)
 
     async def ask(
         self,

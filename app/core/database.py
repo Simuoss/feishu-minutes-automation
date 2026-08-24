@@ -253,6 +253,9 @@ def _ensure_share_access_logs_nullable_key_sync(connection) -> None:
 async def init_db() -> None:
     from app.repository.orm import (  # noqa: F401
         access_key,
+        agent_daily_usage,
+        agent_message,
+        agent_session,
         feishu_user_token,
         figure,
         invite_code,

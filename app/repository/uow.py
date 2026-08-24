@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session_factory
 from app.repository.access_key_repository import AccessKeyRepository
+from app.repository.agent_message_repository import AgentMessageRepository
+from app.repository.agent_session_repository import AgentSessionRepository
+from app.repository.agent_usage_repository import AgentUsageRepository
 from app.repository.feishu_user_token_repository import FeishuUserTokenRepository
 from app.repository.figure_repository import FigureRepository
 from app.repository.invite_code_repository import InviteCodeRepository
@@ -39,6 +42,9 @@ class UnitOfWork:
         self.r2_sync_states: R2SyncStateRepository | None = None
         self.system_configs: SystemConfigRepository | None = None
         self.voiceprints: VoiceprintRepository | None = None
+        self.agent_sessions: AgentSessionRepository | None = None
+        self.agent_messages: AgentMessageRepository | None = None
+        self.agent_usage: AgentUsageRepository | None = None
 
     async def __aenter__(self) -> Self:
         self._session = async_session_factory()
@@ -57,6 +63,9 @@ class UnitOfWork:
         self.r2_sync_states = R2SyncStateRepository(self._session)
         self.system_configs = SystemConfigRepository(self._session)
         self.voiceprints = VoiceprintRepository(self._session)
+        self.agent_sessions = AgentSessionRepository(self._session)
+        self.agent_messages = AgentMessageRepository(self._session)
+        self.agent_usage = AgentUsageRepository(self._session)
         return self
 
     async def __aexit__(

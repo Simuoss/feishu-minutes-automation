@@ -588,7 +588,12 @@ async function openDetail({ allowKeyRetry = true } = {}) {
     .classList.toggle("hidden", !hasTranscript);
   if (hasTranscript || hasSummary) {
     $("#detail-tabs").classList.remove("hidden");
-    switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
+    const deepLinked =
+      typeof applyAgentDeepLink === "function" &&
+      applyAgentDeepLink(switchDetailTab, { hasTranscript, hasSummary });
+    if (!deepLinked) {
+      switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
+    }
     hasContent = true;
   } else {
     $("#detail-tabs")?.classList.add("hidden");

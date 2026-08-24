@@ -14,6 +14,7 @@ function mountAdminSidebar() {
   const superView = isSuperAdminView();
 
   const navItems = [
+    { id: "agent", href: "/agent.html", icon: "ri-sparkling-2-line", label: "检索助手" },
     { id: "meetings", href: "/", icon: "ri-list-unordered", label: "会议列表" },
     { id: "shares", href: "/shares.html", icon: "ri-share-forward-line", label: "分享管理" },
     { id: "keys", href: "/keys.html", icon: "ri-key-2-line", label: "密钥管理" },

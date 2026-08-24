@@ -1264,7 +1264,12 @@ async function openDetail(minuteToken) {
     const hasContent = hasMediaFiles || hasTranscript || hasSummary;
     if (hasTranscript || hasSummary) {
       $("#detail-tabs").classList.remove("hidden");
-      switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
+      const deepLinked =
+        typeof applyAgentDeepLink === "function" &&
+        applyAgentDeepLink(switchDetailTab, { hasTranscript, hasSummary });
+      if (!deepLinked) {
+        switchDetailTab(hasSummary || !hasTranscript ? "summary" : "transcript");
+      }
     }
 
     // 已有完成纪要时不挂空 SSE；仅生成中才跟随

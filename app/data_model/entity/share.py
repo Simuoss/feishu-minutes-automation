@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -136,9 +136,13 @@ class ShareLibraryItemEntity:
     source: str = "KEY"  # KEY / KNOWN_TOKEN
     duration_ms: int | None = None
     create_time: str | None = None  # 妙记生成时间（飞书 create_time）
+    # 仅供服务端读正文用，不出 API
+    owner_user_id: int | None = None
 
 
 @dataclass
 class ShareLibraryResultEntity:
     items: list[ShareLibraryItemEntity]
     keys: list[ShareLibraryKeyStatusEntity]
+    # 本次提交的密钥里真正可用的那些（哈希后），检索助手用来定配额主体
+    usable_key_hashes: list[str] = field(default_factory=list)

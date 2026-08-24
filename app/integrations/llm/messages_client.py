@@ -10,7 +10,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.core import runtime_config
-from app.core.config import settings
+from app.core.config import LlmEndpoint, settings
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,22 @@ class AnthropicMessagesClient:
         self._base_url = (base_url or settings.llm_base_url).rstrip("/")
         self._api_key = api_key or settings.llm_api_key
         self._model = model or settings.llm_model
+
+    @classmethod
+    def for_stage(cls, endpoint: LlmEndpoint) -> "AnthropicMessagesClient":
+        """按某个环节的三件套建客户端。
+
+        走这条路调用点就没机会只取其中一两样，不会出现拿 A 家的密钥打 B 家地址。
+        """
+        return cls(
+            base_url=endpoint.base_url,
+            api_key=endpoint.api_key,
+            model=endpoint.model,
+        )
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     async def complete(
         self,

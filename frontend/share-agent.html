@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>检索助手 · 飞书妙记</title>
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/favicon.png" />
+  <link rel="stylesheet" href="/assets/vendor/remixicon/remixicon.css" />
+  <link rel="stylesheet" href="/assets/style.css?v=20260821-agent-trace" />
+</head>
+<body class="share-body" data-agent-mode="guest">
+  <div id="app" class="share-shell">
+    <aside class="share-sidebar" aria-label="可访问课程列表">
+      <div class="share-sidebar-agent">
+        <a class="sidebar-nav-item is-active" href="/share-agent.html">
+          <i class="ri ri-sparkling-2-line" aria-hidden="true"></i>
+          <span>检索助手</span>
+        </a>
+      </div>
+      <div class="share-sidebar-head">
+        <div class="share-sidebar-title-row">
+          <strong>可访问课程</strong>
+          <button id="share-library-refresh" class="btn btn-sm" type="button" title="刷新列表">
+            <i class="ri ri-refresh-line" aria-hidden="true"></i>
+          </button>
+        </div>
+        <p class="share-sidebar-sub">本机密钥有权限访问的分享</p>
+        <label class="field field-wide share-library-filter-field">
+          <span class="sr-only">筛选课程</span>
+          <input id="share-library-filter" type="search" placeholder="按名称筛选" autocomplete="off" />
+        </label>
+      </div>
+      <div id="share-library-status" class="share-library-status">加载中…</div>
+      <ul id="share-library-list" class="share-library-list"></ul>
+      <div class="share-sidebar-foot">
+        <a class="btn btn-sm" href="/my-shares.html"
+          ><i class="ri ri-key-2-line" aria-hidden="true"></i
+          ><span class="btn-label">管理本机密钥</span></a
+        >
+      </div>
+    </aside>
+
+    <div class="share-main">
+      <header class="header">
+        <div class="header-main">
+          <div>
+            <h1>检索助手</h1>
+            <p class="subtitle">在你能访问的课程里找东西</p>
+          </div>
+          <div class="header-actions">
+            <span id="agent-quota" class="status agent-quota"></span>
+            <button id="agent-new-btn" class="btn btn-sm btn-primary" type="button">
+              <i class="ri ri-add-line" aria-hidden="true"></i><span class="btn-label">新对话</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="view agent-view">
+        <section class="panel agent-sessions-panel">
+          <div class="sidebar-section-head">
+            <h3 class="sidebar-section-title">最近对话</h3>
+            <button id="agent-sessions-refresh" class="btn btn-sm" type="button" title="刷新">
+              <i class="ri ri-refresh-line" aria-hidden="true"></i>
+            </button>
+          </div>
+          <ul id="agent-sessions" class="agent-sessions"></ul>
+          <p id="agent-sessions-empty" class="sidebar-empty">还没有对话，问一句就有了。</p>
+        </section>
+
+        <section class="panel agent-chat-panel">
+          <div id="agent-stream" class="agent-stream" aria-live="polite">
+            <div class="agent-hello">
+              <i class="ri ri-sparkling-2-line" aria-hidden="true"></i>
+              <p>问它「上次讲环境变量是在哪节课」这类问题，它会自己去翻你能看的课程转写和纪要，找到就把原文连着跳转链接发给你。</p>
+            </div>
+          </div>
+          <div class="agent-composer">
+            <textarea
+              id="agent-input"
+              class="agent-input"
+              rows="2"
+              placeholder="想找什么？回车发送，Shift+回车换行"
+            ></textarea>
+            <button id="agent-send" class="btn btn-primary" type="button">
+              <i class="ri ri-send-plane-2-line" aria-hidden="true"></i><span class="btn-label">发送</span>
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script defer src="/assets/config.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/common.js?v=20260816-no-r2-text"></script>
+  <script defer src="/assets/share-storage.js?v=20260805-sameorigin"></script>
+  <script defer src="/assets/vendor/marked.min.js"></script>
+  <script defer src="/assets/vendor/purify.min.js"></script>
+  <script defer src="/assets/safe-markdown.js?v=20260806-safe-md2"></script>
+  <script defer src="/assets/agent-chat.js?v=20260821-agent-trace"></script>
+</body>
+</html>

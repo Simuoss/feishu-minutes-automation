@@ -16,8 +16,12 @@ def _memory_db(monkeypatch: pytest.MonkeyPatch):
     """把 UnitOfWork 指到内存库，避免测试写进开发机的 sqlite。"""
     # 建表要靠 ORM 类先注册到 Base 上，所以这些 import 少不了
     from app.repository.orm import (  # noqa: F401
+        agent_daily_usage,
+        agent_message,
+        agent_session,
         meeting_record,
         pipeline_job,
+        share,
         voiceprint,
     )
 
