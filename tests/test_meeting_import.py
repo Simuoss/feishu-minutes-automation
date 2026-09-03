@@ -39,6 +39,9 @@ def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         staticmethod(fake_followups),
     )
     monkeypatch.setattr(switcher, "_storage", storage)
+    monkeypatch.setattr(
+        "app.service.transcription_flow._storage", storage
+    )
     item = importer.MeetingImportService(storage=storage)
     return item, storage, enqueued
 
@@ -228,6 +231,34 @@ def test_broken_document_does_not_leave_a_half_meeting(
         )
 
     assert enqueued == []
+
+
+@pytest.mark.usefixtures("_memory_db")
+def test_imported_audio_without_transcript_needs_asr(
+    tmp_path: Path, service, monkeypatch: pytest.MonkeyPatch
+):
+    """只导音频也没有转写，不能因为探不出时长就当成「沿用飞书」。"""
+    svc, _, _ = service
+
+    async def boom(path: Path):
+        raise importer.FfmpegError("ffprobe 不在")
+
+    monkeypatch.setattr(importer.ffmpeg_client, "probe", boom)
+    source = tmp_path / "upload.bin"
+    source.write_bytes(b"fake audio")
+
+    result = asyncio.run(
+        svc.import_file(source, owner_user_id=OWNER, filename="录音.m4a")
+    )
+    _, needs_asr = asyncio.run(
+        evaluate_transcript_coverage(
+            result.minute_token, owner_user_id=OWNER
+        )
+    )
+
+    assert result.has_video is False
+    assert result.duration_ms is None
+    assert needs_asr is True
 
 
 @pytest.mark.usefixtures("_memory_db")

@@ -100,6 +100,26 @@ async def evaluate_transcript_coverage(
     text = await _storage.read_transcript_async(
         minute_token, owner_user_id=owner_user_id
     )
+    from app.service.meeting_download_service import LOCAL_IMPORT_EVENT_TYPE
+
+    is_local_import = (
+        record is not None and (record.event_type or "") == LOCAL_IMPORT_EVENT_TYPE
+    )
+    # 本地导入的音视频本来就没有飞书转写。覆盖率是给「飞书只转了前几分钟」用的，
+    # 探不出时长时会得到 None，再被当成「沿用飞书」，音频导入就会空转。
+    if is_local_import and not (text and text.strip()):
+        if needs_self_transcription(0.0) and has_media_for_asr(
+            minute_token, owner_user_id=owner_user_id
+        ):
+            logger.info(
+                "本地导入尚无转写，改走自建转写 token=%s", minute_token
+            )
+            return 0.0, True
+        logger.info(
+            "本地导入尚无转写，且无法自建识别 token=%s", minute_token
+        )
+        return 0.0, False
+
     coverage = transcript_coverage(text, duration_ms)
     if coverage is None:
         logger.info(
