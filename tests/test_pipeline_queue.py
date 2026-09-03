@@ -1,5 +1,7 @@
 """作业队列认领规则与进度合成。"""
 
+import pytest
+
 from app.data_model.entity.pipeline_job import PipelineJobEntity
 from app.integrations.video.ffmpeg_client import parse_ffmpeg_out_time_ms
 from app.service.pipeline_queue import (
@@ -44,6 +46,42 @@ def test_parse_and_encode_job_mode():
     assert parse_job_mode("FULL|force") == ("FULL", True)
     assert parse_job_mode("WRITE") == ("WRITE", False)
     assert encode_job_mode("full", force=True) == "FULL|force"
+    # 二次编码曾把后缀 upper 成 FORCE，worker 拆不开
+    assert parse_job_mode("FULL|FORCE") == ("FULL", True)
+    assert encode_job_mode("FULL|force", force=False) == "FULL|force"
+    assert encode_job_mode("FULL|FORCE", force=False) == "FULL|force"
+
+
+@pytest.mark.usefixtures("_memory_db")
+def test_enqueue_job_does_not_double_encode_force():
+    """调用方预编过 FULL|force 时，入队再编一次也必须落成小写后缀。"""
+    import asyncio
+
+    from app.repository.uow import UnitOfWork
+    from app.service.pipeline_queue import enqueue_job
+    from app.service.summary_generation_service import VALID_MODES
+
+    async def scenario():
+        job_id = await enqueue_job(
+            "tok-force",
+            owner_user_id=1,
+            job_type=JOB_SUMMARY,
+            mode=encode_job_mode("FULL", force=True),
+        )
+        async with UnitOfWork() as uow:
+            assert uow.pipeline_jobs is not None
+            job = await uow.pipeline_jobs.get_latest(
+                "tok-force", JOB_SUMMARY, owner_user_id=1
+            )
+        return job_id, job
+
+    job_id, job = asyncio.run(scenario())
+    assert job_id is not None
+    assert job is not None
+    assert job.mode == "FULL|force"
+    mode, force = parse_job_mode(job.mode)
+    assert force is True
+    assert mode in VALID_MODES
 
 
 def test_pick_claimable_skips_busy_owner_summary():

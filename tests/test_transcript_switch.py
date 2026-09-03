@@ -48,7 +48,9 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     enqueued: list[str] = []
 
     async def fake_enqueue_job(minute_token, *, owner_user_id, job_type, **kwargs):
-        enqueued.append(f"{job_type}:{kwargs.get('mode')}")
+        force = bool(kwargs.get("force"))
+        suffix = "|force" if force else ""
+        enqueued.append(f"{job_type}:{kwargs.get('mode')}{suffix}")
         return 42
 
     async def fake_enqueue_transcribe(minute_token, *, owner_user_id):

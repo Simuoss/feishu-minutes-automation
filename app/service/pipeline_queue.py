@@ -99,17 +99,27 @@ async def wait_for_work(*, timeout: float) -> None:
 
 
 def parse_job_mode(raw: str | None) -> tuple[str, bool]:
+    """拆开落库的 mode。后缀只认 force，大小写不敏感。
+
+    历史上二次编码会把 FULL|force 写成 FULL|FORCE，worker 只认小写后缀就会
+    把整串交给 generate()，被 VALID_MODES 直接拒掉。
+    """
     text = (raw or "FULL").strip()
     force = False
-    if text.endswith("|force"):
+    if text.lower().endswith("|force"):
         force = True
         text = text[: -len("|force")]
     return (text or "FULL").upper(), force
 
 
 def encode_job_mode(mode: str, *, force: bool) -> str:
-    base = (mode or "FULL").strip().upper() or "FULL"
-    return f"{base}|force" if force else base
+    """编成落库用的 mode。已经带后缀的字符串再编一次也还是 FULL|force。
+
+    入队入口会再编一次；调用方若已经编过，这里必须幂等，不能 upper 成
+    FULL|FORCE，也不能把 force 冲掉。
+    """
+    base, already = parse_job_mode(mode)
+    return f"{base}|force" if force or already else base
 
 
 def pick_claimable(

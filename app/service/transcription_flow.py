@@ -22,7 +22,6 @@ from app.service.pipeline_queue import (
     JOB_TRANSCRIBE,
     STATUS_COMPLETED,
     STATUS_FAILED,
-    encode_job_mode,
     enqueue_job,
 )
 from app.service.transcript_anchor import extract_unique_speakers
@@ -284,7 +283,8 @@ async def _enqueue_summary(job: PipelineJobEntity, *, force: bool = False) -> No
         job.minute_token,
         owner_user_id=job.owner_user_id,
         job_type=JOB_SUMMARY,
-        mode=encode_job_mode("FULL", force=force),
+        mode="FULL",
+        force=force,
     )
 
 

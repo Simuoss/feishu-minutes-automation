@@ -441,11 +441,13 @@ def test_finished_transcription_forces_the_summary_to_rerun(monkeypatch):
     )
 
     asyncio.run(transcription_flow._enqueue_summary(job, force=True))
-    assert seen["mode"] == "FULL|force"
+    assert seen["mode"] == "FULL"
+    assert seen["force"] is True
 
     # 转写失败那条路只是拿飞书那几分钟兜底，不该覆盖已有纪要
     asyncio.run(transcription_flow._enqueue_summary(job))
     assert seen["mode"] == "FULL"
+    assert seen["force"] is False
 
 
 def _speaker_candidate(cloud_id: str, centroid: list[float]) -> vp.SpeakerCandidate:

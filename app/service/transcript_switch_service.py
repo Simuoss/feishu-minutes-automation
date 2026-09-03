@@ -22,7 +22,6 @@ from app.service.pipeline_queue import (
     JOB_TRANSCRIBE,
     STATUS_QUEUED,
     STATUS_RUNNING,
-    encode_job_mode,
     enqueue_job,
 )
 from app.service.transcription_flow import (
@@ -172,7 +171,8 @@ async def switch_to_feishu(minute_token: str, *, owner_user_id: int) -> SwitchRe
         minute_token,
         owner_user_id=owner_user_id,
         job_type=JOB_SUMMARY,
-        mode=encode_job_mode("FULL", force=True),
+        mode="FULL",
+        force=True,
     )
     logger.info(
         "手动切回飞书转写 token=%s owner=%s summary_job=%s",
