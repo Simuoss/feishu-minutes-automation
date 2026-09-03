@@ -1084,23 +1084,29 @@ async function importViaR2(file, title, signed) {
   await putWithProgress(signed.upload_url, file, (percent) => {
     setImportProgress(2 + percent * 0.78, `上传中 ${percent.toFixed(0)}%`);
   });
+  // 文件已经在 R2 上了，后面 commit 再失败也不能改走隧道直传
   setImportProgress(85, "服务器正在收取文件…");
-  const commit = await apiFetch("/imports/commit", {
-    method: "POST",
-    body: JSON.stringify({
-      minute_token: signed.minute_token,
-      object_key: signed.object_key,
-      filename: file.name,
-      title: title || null,
-    }),
-  });
-  const data = await commit.json().catch(() => ({}));
-  if (!commit.ok) {
-    throw new Error(
-      typeof data.detail === "string" ? data.detail : commit.statusText
-    );
+  try {
+    const commit = await apiFetch("/imports/commit", {
+      method: "POST",
+      body: JSON.stringify({
+        minute_token: signed.minute_token,
+        object_key: signed.object_key,
+        filename: file.name,
+        title: title || null,
+      }),
+    });
+    const data = await commit.json().catch(() => ({}));
+    if (!commit.ok) {
+      throw new Error(
+        typeof data.detail === "string" ? data.detail : commit.statusText
+      );
+    }
+    return data;
+  } catch (e) {
+    if (e) e.r2PutDone = true;
+    throw e;
   }
-  return data;
 }
 
 async function importViaServer(file, title) {
@@ -1142,9 +1148,9 @@ async function confirmImport() {
       try {
         data = await importViaR2(file, title, signed);
       } catch (e) {
-        // 一个字节都没出去（多半是预检就被 CORS 拦了）才回退，传了一半就不回退，
-        // 免得让几百兆重传一遍
-        if (e?.sentBytes) throw e;
+        // 只有预检就被 CORS 拦下才回退。传了一半、或 R2 已收齐只是 commit
+        // 失败，都不能再把整文件塞进 Cloudflare 隧道，否则大文件会 502
+        if (e?.sentBytes || e?.r2PutDone) throw e;
         setImportProgress(5, "直传被拦，改走服务器上传…");
         data = await importViaServer(file, title);
       }

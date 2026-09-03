@@ -160,6 +160,38 @@ def test_media_import_records_probe_results(
 
 
 @pytest.mark.usefixtures("_memory_db")
+def test_media_import_survives_cross_drive_replace(
+    tmp_path: Path, service, monkeypatch: pytest.MonkeyPatch
+):
+    """Windows 上 C:\\Temp 和数据盘不在一块，os.replace 会 WinError 17。"""
+    svc, storage, _ = service
+
+    async def fake_probe(path: Path):
+        class Probe:
+            duration_seconds = 1.0
+            has_video_stream = True
+
+        return Probe()
+
+    def boom(self, target):
+        raise OSError(17, "系统无法将文件移到不同的磁盘驱动器。")
+
+    monkeypatch.setattr(importer.ffmpeg_client, "probe", fake_probe)
+    monkeypatch.setattr(Path, "replace", boom)
+    source = tmp_path / "upload.bin"
+    source.write_bytes(b"fake video")
+
+    result = asyncio.run(
+        svc.import_file(source, owner_user_id=OWNER, filename="录屏.mp4")
+    )
+
+    dest = storage.find_media_path(result.minute_token, owner_user_id=OWNER)
+    assert dest is not None
+    assert dest.read_bytes() == b"fake video"
+    assert source.exists() is False
+
+
+@pytest.mark.usefixtures("_memory_db")
 def test_unprobeable_media_still_imports(
     tmp_path: Path, service, monkeypatch: pytest.MonkeyPatch
 ):

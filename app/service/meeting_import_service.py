@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +72,20 @@ def sanitize_filename(name: str) -> str:
     return cleaned or "import"
 
 
+def relocate_import_file(source: Path, dest: Path) -> None:
+    """把暂存文件收进会议目录。
+
+    `Path.replace` 底层是 `os.replace`，Windows 不能跨盘（C:\\Temp → D:\\data）。
+    同盘仍走原子改名；跨盘再 copy + 删源。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source.replace(dest)
+    except OSError:
+        shutil.copy2(source, dest)
+        source.unlink(missing_ok=True)
+
+
 def classify(filename: str) -> str:
     """按扩展名判断这是媒体还是文档。"""
     suffix = Path(filename).suffix.lower()
@@ -106,7 +121,10 @@ class MeetingImportService:
 
         if kind == "media":
             media_path = layout["media"] / sanitize_filename(filename)
-            source.replace(media_path)
+            try:
+                relocate_import_file(source, media_path)
+            except OSError as exc:
+                raise MeetingImportError(f"保存文件失败：{exc}") from exc
             duration_ms, has_video = await self._probe_media(media_path)
             transcript_path: Path | None = None
             transcript_source = None
