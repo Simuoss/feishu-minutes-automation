@@ -159,6 +159,12 @@ class PipelineWorker:
         broker = summary_broker.bind(
             job.minute_token, owner_user_id=job.owner_user_id
         )
+        from app.service.progress_profile import resolve_progress_profile
+
+        profile = await resolve_progress_profile(
+            job.minute_token, owner_user_id=job.owner_user_id
+        )
+        broker.set_profile(profile.to_dict())
         broker.queue(position=0)
         result = await summary_generation_service.generate(
             job.minute_token,

@@ -26,6 +26,13 @@ class GenerateSummaryResponse(BaseModel):
     mode: str = "FULL"
 
 
+class ProgressProfileData(BaseModel):
+    id: str
+    label: str
+    has_transcribe: bool
+    has_figures: bool
+
+
 class SummaryProgressResponse(BaseModel):
     minute_token: str
     owner_user_id: int | None = None
@@ -43,6 +50,7 @@ class SummaryProgressResponse(BaseModel):
     llm_slots_free: int = 0
     llm_waiters: int = 0
     job_type: str | None = None
+    progress_profile: ProgressProfileData | None = None
 
 
 class ProgressBatchItem(BaseModel):

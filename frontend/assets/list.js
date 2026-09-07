@@ -512,10 +512,12 @@ async function refreshSummaryBadges() {
         Number.isFinite(total) && total > 0
           ? `大模型空闲 ${Number.isFinite(free) ? Math.max(0, free) : 0}/${total}`
           : "";
+      const modeLabel = row.progress_profile && row.progress_profile.label;
       const stageBase = row.stage || (next === "QUEUED" ? "排队中" : "生成纪要中");
+      const labeled = modeLabel ? `${modeLabel} · ${stageBase}` : stageBase;
       setItemProgress(item.minute_token, {
         percent: row.percent,
-        stage: poolHint ? `${stageBase} · ${poolHint}` : stageBase,
+        stage: poolHint ? `${labeled} · ${poolHint}` : labeled,
         status: next === "QUEUED" ? "pending" : "downloading",
       });
     }
@@ -1169,7 +1171,15 @@ async function confirmImport() {
 }
 
 async function downloadOne(token, options = {}) {
-  const res = await apiFetch(`/meetings/download?sync=true`, {
+  const owner = options.owner_user_id;
+  if (isSuperAdminView() && (owner == null || owner === "")) {
+    throw new Error("缺少会议归属，无法代为同步");
+  }
+  const qs = ["sync=true"];
+  if (owner != null && owner !== "") {
+    qs.push(`owner_user_id=${encodeURIComponent(owner)}`);
+  }
+  const res = await apiFetch(`/meetings/download?${qs.join("&")}`, {
     method: "POST",
     body: JSON.stringify({
       minute_tokens: [token],
@@ -1258,6 +1268,7 @@ async function runBatchDownload({
         skip_if_completed: true,
         redownload_media,
         redownload_transcript,
+        owner_user_id: ownerId,
       });
       if (result.status === "COMPLETED") {
         stopProgressPolling(token, ownerId);

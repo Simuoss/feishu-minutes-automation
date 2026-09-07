@@ -427,21 +427,23 @@ async def resolve_progress(
         else:
             video_stage = video_job.stage or "压缩分享片中"
 
+    snap: dict | None = None
+    transcribe_inflight = bool(
+        transcribe_job and transcribe_job.status in {STATUS_QUEUED, STATUS_RUNNING}
+    )
     # 转写在纪要之前跑，进行中时它才是用户真正在等的那一步
-    if transcribe_job and transcribe_job.status in {STATUS_QUEUED, STATUS_RUNNING}:
+    if transcribe_inflight:
         stage = (
             "自建转写排队中"
-            if transcribe_job.status == STATUS_QUEUED
-            else f"自建转写 · {transcribe_job.stage or '处理中'}"
+            if transcribe_job is not None and transcribe_job.status == STATUS_QUEUED
+            else f"自建转写 · {(transcribe_job.stage if transcribe_job else None) or '处理中'}"
         )
-        return job_to_progress(transcribe_job, extra_stage=stage)
-
-    if channel is not None:
+        snap = job_to_progress(transcribe_job, extra_stage=stage)
+    elif channel is not None:
         snap = channel.snapshot()
         if video_stage:
             snap["stage"] = f"{snap.get('stage') or '生成中'} · {video_stage}"
-        return snap
-    if summary_job and summary_job.status in {
+    elif summary_job and summary_job.status in {
         STATUS_QUEUED,
         STATUS_RUNNING,
         STATUS_FAILED,
@@ -449,16 +451,26 @@ async def resolve_progress(
         extra = video_stage
         if summary_job.status == STATUS_QUEUED and video_stage:
             extra = f"纪要排队 · {video_stage}"
-        return job_to_progress(summary_job, extra_stage=extra)
-    if video_job and video_running:
-        return job_to_progress(video_job, extra_stage=video_stage)
-    # 转写失败时不会再入队纪要，这里兜住否则详情页只看到「暂无进度」
-    if transcribe_job and transcribe_job.status == STATUS_FAILED:
-        return job_to_progress(
+        snap = job_to_progress(summary_job, extra_stage=extra)
+    elif video_job and video_running:
+        snap = job_to_progress(video_job, extra_stage=video_stage)
+    elif transcribe_job and transcribe_job.status == STATUS_FAILED:
+        # 转写失败时不会再入队纪要，这里兜住否则详情页只看到「暂无进度」
+        snap = job_to_progress(
             transcribe_job,
             extra_stage=f"自建转写失败 · {transcribe_job.stage or '未知阶段'}",
         )
-    return None
+    if snap is None:
+        return None
+    from app.service.progress_profile import resolve_progress_profile
+
+    profile = await resolve_progress_profile(
+        minute_token,
+        owner_user_id=owner_user_id,
+        transcribe_inflight=transcribe_inflight,
+    )
+    snap["progress_profile"] = profile.to_dict()
+    return snap
 
 
 async def latest_jobs(

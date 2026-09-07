@@ -44,6 +44,7 @@ class SummaryChannel:
     error_message: str | None = None
     buffer: str = ""
     plan_items: list[dict[str, Any]] = field(default_factory=list)
+    progress_profile: dict[str, Any] | None = None
     updated_at: str = field(default_factory=_now_iso)
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
 
@@ -61,6 +62,7 @@ class SummaryChannel:
             "queue_position": self.queue_position,
             "error_message": self.error_message,
             "updated_at": self.updated_at,
+            "progress_profile": self.progress_profile,
         }
         payload.update(llm_call_pool.stats())
         return payload
@@ -75,6 +77,11 @@ class BoundSummaryBroker:
         self._broker = broker
         self._token = minute_token
         self._owner = owner_user_id
+
+    def set_profile(self, profile: dict[str, Any] | None) -> None:
+        self._broker.set_profile(
+            self._token, owner_user_id=self._owner, profile=profile
+        )
 
     def queue(self, position: int = 0) -> None:
         self._broker.queue(self._token, owner_user_id=self._owner, position=position)
@@ -154,6 +161,20 @@ class SummaryEventBroker:
 
     def clear(self, minute_token: str, *, owner_user_id: int) -> None:
         self._channels.pop(resource_key(owner_user_id, minute_token), None)
+
+    def set_profile(
+        self,
+        minute_token: str,
+        *,
+        owner_user_id: int,
+        profile: dict[str, Any] | None,
+    ) -> None:
+        channel = self._ensure(minute_token, owner_user_id=owner_user_id)
+        if channel.progress_profile == profile:
+            return
+        channel.progress_profile = profile
+        channel.updated_at = _now_iso()
+        self._broadcast(channel, "status", channel.snapshot())
 
     def _broadcast(
         self, channel: SummaryChannel, event: str, data: dict[str, Any]

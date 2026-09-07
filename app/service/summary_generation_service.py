@@ -124,6 +124,15 @@ class SummaryGenerationService:
                 mode=run_mode,
             )
 
+        from app.service.progress_profile import resolve_progress_profile
+
+        profile = await resolve_progress_profile(
+            minute_token,
+            owner_user_id=owner_user_id,
+            storage=self._storage,
+        )
+        broker.set_profile(profile.to_dict())
+
         if run_mode == "R2_SYNC":
             return await self._run_r2_sync(
                 minute_token, owner_user_id=owner_user_id
@@ -895,31 +904,44 @@ class SummaryGenerationService:
             )
 
             if mode == "FULL":
-                try:
-                    figures = await self._prepare_figures(
-                        minute_token,
-                        transcript,
-                        scene=decision.scene,
-                        owner_user_id=owner_user_id,
-                    )
-                except LlmRequestError as exc:
-                    logger.warning(
-                        "截图计划阶段模型不可用，本次降级为纯文字纪要 token=%s：%s",
-                        minute_token,
-                        exc,
-                    )
-                    figures = []
-                except FfmpegError as exc:
-                    logger.warning(
-                        "抽帧失败，本次降级为纯文字纪要 token=%s：%s",
-                        minute_token,
-                        exc,
-                    )
-                    figures = []
-                figure_prepared = len(figures)
-                figures, redaction_meta = await self._run_redaction(
-                    minute_token, figures, owner_user_id=owner_user_id
+                from app.service.progress_profile import resolve_progress_profile
+
+                profile = await resolve_progress_profile(
+                    minute_token,
+                    owner_user_id=owner_user_id,
+                    storage=self._storage,
                 )
+                broker.set_profile(profile.to_dict())
+                if profile.has_figures:
+                    try:
+                        figures = await self._prepare_figures(
+                            minute_token,
+                            transcript,
+                            scene=decision.scene,
+                            owner_user_id=owner_user_id,
+                        )
+                    except LlmRequestError as exc:
+                        logger.warning(
+                            "截图计划阶段模型不可用，本次降级为纯文字纪要 token=%s：%s",
+                            minute_token,
+                            exc,
+                        )
+                        figures = []
+                    except FfmpegError as exc:
+                        logger.warning(
+                            "抽帧失败，本次降级为纯文字纪要 token=%s：%s",
+                            minute_token,
+                            exc,
+                        )
+                        figures = []
+                    figure_prepared = len(figures)
+                    figures, redaction_meta = await self._run_redaction(
+                        minute_token, figures, owner_user_id=owner_user_id
+                    )
+                else:
+                    figures = []
+                    broker.update(percent=40, stage="本场无画面，直接成文")
+                    await update_job(job_id, stage="WRITE", percent=40.0)
                 result = await self._write_summary(
                     minute_token,
                     transcript,

@@ -328,61 +328,111 @@ function summaryMetaText(meta) {
   return parts.join(" · ");
 }
 
-const SUMMARY_STAGES = [
-  {
+const STAGE_DEFS = {
+  queue: {
     id: "queue",
     title: "排队等待",
     desc: "任务已入队：可能在等同账号上一场纪要、模型槽位或分享片压缩",
   },
-  {
+  transcribe: {
+    id: "transcribe",
+    title: "自建转写",
+    desc: "把音视频送给识别服务，补全飞书没转完的部分，或给导入的媒体做全文识别",
+  },
+  parse: {
     id: "parse",
     title: "解析转写",
     desc: "整理发言段落，为成文与锚点做准备",
   },
-  {
+  scene: {
     id: "scene",
     title: "判定场景",
     desc: "看开头与发言分布，判断这场是讲课还是会议",
   },
-  {
+  figures: {
     id: "figures",
     title: "准备配图",
     desc: "抽帧判断共享屏幕，规划并筛选截图",
   },
-  {
+  redact: {
     id: "redact",
     title: "敏感脱敏",
     desc: "扫描敏感信息、打码并复核",
   },
-  {
+  write: {
     id: "write",
     title: "模型成文",
     desc: "读图与转写，按知识结构写纪要正文",
   },
-  {
+  finalize: {
     id: "finalize",
     title: "收尾落盘",
     desc: "校正时间锚点、清理配图并写入本地",
   },
+};
+
+const DEFAULT_STAGE_IDS = [
+  "queue",
+  "parse",
+  "scene",
+  "figures",
+  "redact",
+  "write",
+  "finalize",
 ];
 
-function resolveSummaryStageId(data) {
+function stagesForProgress(data) {
+  const profile = data && data.progress_profile;
+  if (!profile) {
+    return DEFAULT_STAGE_IDS.map((id) => STAGE_DEFS[id]);
+  }
+  const ids = ["queue"];
+  if (profile.has_transcribe) ids.push("transcribe");
+  ids.push("parse", "scene");
+  if (profile.has_figures) ids.push("figures", "redact");
+  ids.push("write", "finalize");
+  return ids.map((id) => {
+    const stage = STAGE_DEFS[id];
+    if (id !== "transcribe") return stage;
+    if (profile.id === "import_audio" || profile.id === "import_video") {
+      return {
+        ...stage,
+        desc: "导入的媒体没有飞书转写，正在做全文识别",
+      };
+    }
+    return {
+      ...stage,
+      desc: "飞书只转了前几分钟，正在用自建识别补全后半段",
+    };
+  });
+}
+
+function resolveSummaryStageId(data, stages) {
   if (!data) return "queue";
-  if (data.status === "FAILED") return "finalize";
+  const ids = new Set((stages || []).map((item) => item.id));
+  const hasFigures = ids.has("figures");
+  const hasTranscribe = ids.has("transcribe");
+  if (data.status === "FAILED") return ids.has("finalize") ? "finalize" : "write";
   if (data.status === "QUEUED" || data.status === "PENDING") return "queue";
   const stage = String(data.stage || "");
   const percent = Number(data.percent) || 0;
+  if (data.job_type === "TRANSCRIBE" || /自建转写/.test(stage)) {
+    return hasTranscribe ? "transcribe" : "parse";
+  }
   if (/排队|槽位|同账号|压缩分享/.test(stage)) return "queue";
+  if (/无画面|跳过配图|直接成文/.test(stage)) return "write";
   if (/解析转写/.test(stage) || (percent > 0 && percent < 6)) return "parse";
   if (/场景|讲课还是会议/.test(stage)) return "scene";
-  if (/敏感|打码|脱敏|扫描 .* 张截图/.test(stage) || (percent >= 32 && percent < 40)) {
-    return "redact";
-  }
-  if (
-    /探测视频|抽帧|共享屏幕|规划截图|筛选|挑出|看抽帧|抽取画面样本/.test(stage) ||
-    (percent >= 6 && percent < 32)
-  ) {
-    return "figures";
+  if (hasFigures) {
+    if (/敏感|打码|脱敏|扫描 .* 张截图/.test(stage) || (percent >= 32 && percent < 40)) {
+      return "redact";
+    }
+    if (
+      /探测视频|抽帧|共享屏幕|规划截图|筛选|挑出|看抽帧|抽取画面样本/.test(stage) ||
+      (percent >= 6 && percent < 32)
+    ) {
+      return "figures";
+    }
   }
   if (
     /模型|读 .* 张截图|生成中|重试/.test(stage) ||
@@ -394,27 +444,36 @@ function resolveSummaryStageId(data) {
   if (/校正|清理|写入|落盘|同步/.test(stage) || percent >= 90) return "finalize";
   if (percent <= 0) return "queue";
   if (percent < 8) return "parse";
-  if (percent < 32) return "figures";
-  if (percent < 40) return "redact";
+  if (hasFigures && percent < 32) return "figures";
+  if (hasFigures && percent < 40) return "redact";
+  if (!hasFigures && percent < 40) return "scene";
   if (percent < 90) return "write";
   return "finalize";
 }
 
 function renderSummaryStages(data) {
   const root = $("#summary-stage-steps");
+  const modeEl = $("#summary-stage-mode");
   if (!root) return;
-  const activeId = resolveSummaryStageId(data);
-  const activeIndex = SUMMARY_STAGES.findIndex((s) => s.id === activeId);
+  const stages = stagesForProgress(data);
+  const activeId = resolveSummaryStageId(data, stages);
+  const activeIndex = stages.findIndex((item) => item.id === activeId);
   const failed = data?.status === "FAILED";
+  const modeLabel = data?.progress_profile?.label || "";
+  if (modeEl) {
+    modeEl.textContent = modeLabel ? `进度模式：${modeLabel}` : "";
+    modeEl.classList.toggle("hidden", !modeLabel);
+  }
+  root.style.gridTemplateColumns = `repeat(${stages.length}, minmax(0, 1fr))`;
 
-  root.innerHTML = SUMMARY_STAGES.map((stage, index) => {
+  root.innerHTML = stages.map((stage, index) => {
     let stateClass = "is-pending";
     if (failed && index === activeIndex) stateClass = "is-failed";
     else if (index < activeIndex) stateClass = "is-done";
     else if (index === activeIndex) stateClass = "is-active";
     return `
       <li class="summary-stage ${stateClass}" data-stage="${stage.id}">
-        <span class="summary-stage-index">阶段 ${index + 1}/${SUMMARY_STAGES.length}</span>
+        <span class="summary-stage-index">阶段 ${index + 1}/${stages.length}</span>
         <span class="summary-stage-title">${escapeHtml(stage.title)}</span>
         <span class="summary-stage-desc">${escapeHtml(stage.desc)}</span>
       </li>`;

@@ -21,6 +21,27 @@ def test_queue_does_not_downgrade_generating_status():
     summary_broker.clear(token, owner_user_id=OWNER)
 
 
+def test_snapshot_carries_progress_profile():
+    token = "broker-test-profile"
+    summary_broker.clear(token, owner_user_id=OWNER)
+    summary_broker.set_profile(
+        token,
+        owner_user_id=OWNER,
+        profile={
+            "id": "import_audio",
+            "label": "上传音频",
+            "has_transcribe": True,
+            "has_figures": False,
+        },
+    )
+    channel = summary_broker.get(token, owner_user_id=OWNER)
+    assert channel is not None
+    snap = channel.snapshot()
+    assert snap["progress_profile"]["id"] == "import_audio"
+    assert snap["progress_profile"]["has_figures"] is False
+    summary_broker.clear(token, owner_user_id=OWNER)
+
+
 def test_append_delta_promotes_queued_to_generating():
     token = "broker-test-2"
     summary_broker.clear(token, owner_user_id=OWNER)
