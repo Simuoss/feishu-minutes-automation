@@ -35,6 +35,7 @@ from app.service.ownership import (
     assert_meeting_progress_visible,
     assert_meeting_readable,
     resolve_resource_owner,
+    resolve_write_owner,
 )
 from app.service.r2_media_service import r2_media_service
 from app.service.transcript_switch_service import TranscriptSwitchError
@@ -173,8 +174,9 @@ async def download_meetings(
     background_tasks: BackgroundTasks,
     request: Request,
     sync: bool = Query(default=False, description="为 true 时同步等待下载完成"),
+    owner_user_id: int | None = None,
 ) -> DownloadMeetingsResponse:
-    owner_id = require_user_id(request)
+    owner_id = resolve_write_owner(request, owner_user_id=owner_user_id)
     tokens = list(dict.fromkeys(t for t in body.minute_tokens if t.strip()))
     if not tokens:
         raise HTTPException(status_code=400, detail="minute_tokens 不能为空")

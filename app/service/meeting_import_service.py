@@ -80,9 +80,9 @@ def relocate_import_file(source: Path, dest: Path) -> None:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        source.replace(dest)
+        _ = source.replace(dest)
     except OSError:
-        shutil.copy2(source, dest)
+        _ = shutil.copy2(source, dest)
         source.unlink(missing_ok=True)
 
 
@@ -95,14 +95,14 @@ def classify(filename: str) -> str:
         return "text"
     raise MeetingImportError(
         f"不支持的文件类型 {suffix or '（无扩展名）'}；"
-        "音视频支持 mp4/mov/mkv/webm/mp3/m4a/wav/aac/ogg，"
-        "文档支持 txt/md/srt/docx/pdf"
+        + "音视频支持 mp4/mov/mkv/webm/mp3/m4a/wav/aac/ogg，"
+        + "文档支持 txt/md/srt/docx/pdf"
     )
 
 
 class MeetingImportService:
     def __init__(self, storage: MeetingStorageService | None = None) -> None:
-        self._storage = storage or MeetingStorageService()
+        self._storage: MeetingStorageService = storage or MeetingStorageService()
 
     async def import_file(
         self,
@@ -188,7 +188,7 @@ class MeetingImportService:
         target = source
         if source.suffix.lower() != suffix:
             target = source.with_name(f"{source.name}{suffix}")
-            source.replace(target)
+            _ = source.replace(target)
         try:
             return parse_document(target)
         except DocumentParseError as exc:

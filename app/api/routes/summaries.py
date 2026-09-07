@@ -172,7 +172,6 @@ async def generate_summary(
     sync: bool = Query(default=False, description="为 true 时同步等待生成完成，耗时可达数分钟"),
     owner_user_id: int | None = None,
 ) -> GenerateSummaryResponse:
-    require_user_id(request)
     owner = await assert_meeting_readable(
         request, minute_token, owner_user_id=owner_user_id
     )

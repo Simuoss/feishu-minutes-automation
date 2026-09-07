@@ -115,6 +115,30 @@ async def meeting_owned_by(minute_token: str, owner_user_id: int | None) -> bool
     )
 
 
+def resolve_write_owner(
+    request: Request,
+    *,
+    owner_user_id: int | None = None,
+) -> int:
+    """写操作的目标归属。普通用户只能写自己；超管必须指定 owner。
+
+    下载、补跑纪要这类代操作走这里，不再被「超管只读」一刀切掉。
+    """
+    auth = require_auth(request)
+    if auth.is_user:
+        if auth.user_id is None:
+            raise HTTPException(status_code=401, detail="需要登录")
+        return int(auth.user_id)
+    if auth.is_super_admin:
+        if owner_user_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="超级管理员操作会议时必须指定 owner_user_id",
+            )
+        return int(owner_user_id)
+    raise HTTPException(status_code=401, detail="需要登录")
+
+
 def scope_from_request(request: Request) -> int | None:
     return owner_scope_user_id(request)
 
