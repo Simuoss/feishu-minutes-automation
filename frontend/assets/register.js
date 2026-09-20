@@ -42,7 +42,7 @@ async function tryRegister() {
     err.classList.remove("hidden");
     return;
   }
-  setUserJwt(bearer);
+  applySessionPayload(data, { role: "USER" });
   setAdminViewMode("user");
   location.replace(next.startsWith("/") ? next : "/");
 }

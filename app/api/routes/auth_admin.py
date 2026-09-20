@@ -8,7 +8,11 @@ from fastapi import APIRouter, HTTPException, Request
 from app.core.admin_auth import is_request_authorized, is_super_admin_token
 from app.core.auth_context import require_auth, require_user_id
 from app.core.config import settings
-from app.core.jwt_auth import issue_super_admin_token, issue_user_token
+from app.core.jwt_auth import (
+    decode_refresh_token,
+    issue_super_session,
+    issue_user_session,
+)
 from app.core.password import hash_password, verify_password
 from app.data_model.entity.invite_code import InviteCodeCreateEntity, InviteCodeQueryEntity
 from app.data_model.entity.user import UserCreateEntity, UserUpdateEntity
@@ -40,9 +44,14 @@ class AuthTokenResponse(BaseModel):
     authorized: bool
     message: str = ""
     token: str = ""
+    refresh_token: str = ""
     role: str = ""
     username: str | None = None
     user_id: int | None = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class AuthStatusResponse(BaseModel):
@@ -145,11 +154,12 @@ async def user_login(body: LoginRequest) -> AuthTokenResponse:
             )
         if not verify_password(password, user.password_hash):
             raise HTTPException(status_code=401, detail="用户名或密码错误")
-        token = issue_user_token(user_id=user.id, username=user.username)
+        pair = issue_user_session(user_id=user.id, username=user.username)
         return AuthTokenResponse(
             authorized=True,
             message="登录成功",
-            token=token,
+            token=pair.access_token,
+            refresh_token=pair.refresh_token,
             role="USER",
             username=user.public_display_name(),
             user_id=user.id,
@@ -196,11 +206,12 @@ async def register(body: RegisterRequest) -> AuthTokenResponse:
             await uow.rollback()
             raise HTTPException(status_code=400, detail="邀请码无效或已使用")
         await uow.commit()
-        token = issue_user_token(user_id=user.id, username=user.username)
+        pair = issue_user_session(user_id=user.id, username=user.username)
         return AuthTokenResponse(
             authorized=True,
             message="注册成功",
-            token=token,
+            token=pair.access_token,
+            refresh_token=pair.refresh_token,
             role="USER",
             username=user.username,
             user_id=user.id,
@@ -215,14 +226,47 @@ async def super_login(body: SuperLoginRequest) -> AuthTokenResponse:
         raise HTTPException(status_code=503, detail="未配置超级管理员口令")
     if not is_super_admin_token((body.token or "").strip()):
         raise HTTPException(status_code=401, detail="超级管理员口令错误")
-    token = issue_super_admin_token()
+    pair = issue_super_session()
     return AuthTokenResponse(
         authorized=True,
         message="超级管理员已解锁",
-        token=token,
+        token=pair.access_token,
+        refresh_token=pair.refresh_token,
         role="SUPER_ADMIN",
         username=None,
         user_id=None,
+    )
+
+
+@router.post("/refresh", response_model=AuthTokenResponse)
+async def refresh_session(body: RefreshRequest) -> AuthTokenResponse:
+    """用刷新票换一对新票。刷新票本身也会换新，旧的作废。"""
+    if not (settings.jwt_secret or "").strip():
+        raise HTTPException(status_code=503, detail="未配置 JWT_SECRET")
+    principal = decode_refresh_token(body.refresh_token)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="刷新凭证无效或已过期")
+    if principal.is_super_admin:
+        pair = issue_super_session()
+        return AuthTokenResponse(
+            authorized=True,
+            message="已续期",
+            token=pair.access_token,
+            refresh_token=pair.refresh_token,
+            role="SUPER_ADMIN",
+        )
+    if not principal.is_user or principal.user_id is None:
+        raise HTTPException(status_code=401, detail="刷新凭证无效或已过期")
+    username = principal.username or str(principal.user_id)
+    pair = issue_user_session(user_id=principal.user_id, username=username)
+    return AuthTokenResponse(
+        authorized=True,
+        message="已续期",
+        token=pair.access_token,
+        refresh_token=pair.refresh_token,
+        role="USER",
+        username=username,
+        user_id=principal.user_id,
     )
 
 

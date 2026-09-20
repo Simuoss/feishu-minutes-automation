@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.core.admin_auth import resolve_request_principal
 from app.core.auth_context import require_user_id
 from app.core.config import settings
-from app.core.jwt_auth import issue_user_token
+from app.core.jwt_auth import issue_user_session
 from app.core.request_urls import (
     decode_oauth_state,
     encode_oauth_state,
@@ -47,6 +47,7 @@ class SsoExchangeRequest(BaseModel):
 
 class SsoExchangeResponse(BaseModel):
     token: str
+    refresh_token: str = ""
     user_id: int
     username: str
     setup_name: bool = False
@@ -70,6 +71,7 @@ def _build_authorize_url_anonymous(
 async def auth_status(request: Request) -> AuthStatusResponse:
     user_id = require_user_id(request)
     user_auth = FeishuUserAuthClient(user_id=user_id)
+    await user_auth.maybe_slide_refresh()
     authorized, granted, missing = await user_auth.auth_status_async()
     feishu_bound = False
     async with UnitOfWork() as uow:
@@ -181,9 +183,10 @@ async def sso_exchange(body: SsoExchangeRequest) -> SsoExchangeResponse:
             status_code=400,
             detail="登录凭证无效或已过期，请重新使用飞书登录",
         )
-    token = issue_user_token(user_id=payload.user_id, username=payload.username)
+    pair = issue_user_session(user_id=payload.user_id, username=payload.username)
     return SsoExchangeResponse(
-        token=token,
+        token=pair.access_token,
+        refresh_token=pair.refresh_token,
         user_id=payload.user_id,
         username=payload.username,
         setup_name=payload.setup_name,

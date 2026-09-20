@@ -174,11 +174,14 @@ class MeetingListService:
         *,
         owner_user_id: int,
         db_summary_status: str | None = None,
+        pipeline_inflight: bool = False,
     ) -> str:
         """列表纪要状态：broker 进行中优先，其余只信 DB，禁止扫盘。"""
         channel = summary_broker.get(minute_token, owner_user_id=owner_user_id)
         if channel is not None and channel.status in _SUMMARY_IN_FLIGHT:
             return channel.status
+        if pipeline_inflight:
+            return SummaryStatus.GENERATING.value
         db_status = (db_summary_status or "").strip().upper()
         if db_status in {"COMPLETED", "READY"}:
             return "READY"
@@ -197,6 +200,9 @@ class MeetingListService:
         limit: int = 500,
     ) -> dict[str, Any]:
         """从 DB 列出已入库会议。owner_user_id=None 表示超管看全站。"""
+        from app.service.pipeline_queue import inflight_meeting_keys
+
+        inflight = await inflight_meeting_keys()
         async with UnitOfWork() as uow:
             assert uow.meeting_records is not None
             assert uow.users is not None
@@ -244,6 +250,7 @@ class MeetingListService:
                     token,
                     owner_user_id=row_owner,
                     db_summary_status=record.summary_status,
+                    pipeline_inflight=(row_owner, token) in inflight,
                 )
             else:
                 summary_status = "NONE"

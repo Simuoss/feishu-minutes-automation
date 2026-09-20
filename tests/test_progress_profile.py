@@ -52,6 +52,7 @@ def test_import_video_has_transcribe_and_figures():
     assert profile.id == "import_video"
     assert profile.has_transcribe is True
     assert profile.has_figures is True
+    assert profile.has_share is True
 
 
 def test_feishu_full_video_has_figures_no_transcribe():

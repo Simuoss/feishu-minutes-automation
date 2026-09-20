@@ -17,6 +17,7 @@ from app.service.minute_subscription_service import ensure_minute_generated_subs
 from app.service.stale_job_recovery import recover_stale_inflight_jobs
 
 _ws_runner: FeishuWsClientRunner | None = None
+_feishu_refresh_task: asyncio.Task[None] | None = None
 
 
 async def _run_create_time_backfill(backfill) -> None:
@@ -28,7 +29,7 @@ async def _run_create_time_backfill(backfill) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _ws_runner
+    global _ws_runner, _feishu_refresh_task
     setup_logging(debug=settings.app_debug)
     log_llm_wiring()
     await init_db()
@@ -72,11 +73,26 @@ async def lifespan(_app: FastAPI):
         _run_create_time_backfill(backfill_missing_create_times),
         name="create-time-backfill",
     )
+    from app.service.feishu_token_refresh_job import (
+        run_daily_feishu_token_refresh_loop,
+    )
+
+    _feishu_refresh_task = asyncio.create_task(
+        run_daily_feishu_token_refresh_loop(),
+        name="feishu-token-refresh",
+    )
     _ws_runner = FeishuWsClientRunner()
     _ws_runner.start()
     # 进程重启后补订阅：用户身份订阅不会随 WS 建连自动恢复
     await ensure_minute_generated_subscription()
     yield
+    if _feishu_refresh_task is not None:
+        _feishu_refresh_task.cancel()
+        try:
+            await _feishu_refresh_task
+        except asyncio.CancelledError:
+            pass
+        _feishu_refresh_task = None
     await pipeline_worker.stop()
 
 

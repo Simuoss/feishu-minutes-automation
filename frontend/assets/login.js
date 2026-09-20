@@ -48,7 +48,7 @@ async function tryLogin() {
     err.classList.remove("hidden");
     return;
   }
-  setUserJwt(bearer);
+  applySessionPayload(data, { role: "USER" });
   setAdminViewMode("user");
   location.replace(next.startsWith("/") ? next : "/");
 }
@@ -57,7 +57,7 @@ function startFeishuSso() {
   location.href = feishuLoginUrl();
 }
 
-if (getUserJwt()) {
+if (getUserJwt() || getUserRefresh()) {
   location.replace(next.startsWith("/") ? next : "/");
 }
 

@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # 用户/超管 JWT
     jwt_secret: str = ""
     jwt_expire_seconds: int = 604800
+    # 刷新票比访问票长；每次 /auth/refresh 会连刷新票一起换新
+    jwt_refresh_expire_seconds: int = 2592000
 
     @property
     def resolved_super_admin_token(self) -> str:

@@ -1,6 +1,8 @@
 const API = window.APP_CONFIG?.apiBase ?? "http://127.0.0.1:7354/api/v1";
 const USER_JWT_KEY = "minutes_user_jwt";
+const USER_REFRESH_KEY = "minutes_user_refresh";
 const SUPER_JWT_KEY = "minutes_super_jwt";
+const SUPER_REFRESH_KEY = "minutes_super_refresh";
 const VIEW_MODE_KEY = "minutes_admin_view_mode";
 /** 兼容旧 key，读一次后迁移 */
 const LEGACY_ADMIN_TOKEN_KEY = "minutes_admin_token";
@@ -20,21 +22,38 @@ function formatDuration(ms) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function parseTimeMs(raw) {
+  if (raw == null || raw === "") return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  // 飞书入库的 create_time 经常是纯数字毫秒串；Date.parse 认不出来会变成 Invalid Date
+  if (/^\d+$/.test(text)) {
+    const n = Number(text);
+    if (!Number.isFinite(n)) return null;
+    if (n > 1e12) return n;
+    if (n > 1e11) return n * 1000;
+    if (n > 1e9) return n * 1000;
+    return null;
+  }
+  const n = Number(text);
+  if (Number.isFinite(n) && n > 1e11) {
+    return n > 1e12 ? n : n * 1000;
+  }
+  // 仅飞书式 YYYY.MM.DD… 把日期点换成横杠；勿动 ISO 毫秒小数点，否则会解析失败甩出原串
+  const normalized = /^\d{4}\.\d{1,2}\.\d{1,2}\b/.test(text)
+    ? text.replace(/^(\d{4})\.(\d{1,2})\.(\d{1,2})/, "$1-$2-$3").replace(" ", "T")
+    : text.includes("T")
+      ? text
+      : text.replace(" ", "T");
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 function formatTime(raw) {
   if (!raw) return null;
-  const n = Number(raw);
-  let d;
-  if (Number.isFinite(n) && n > 1e11) {
-    // 秒级 / 毫秒级时间戳
-    d = new Date(n > 1e12 ? n : n * 1000);
-  } else {
-    const s = String(raw).trim();
-    // 仅飞书式 YYYY.MM.DD… 把日期点换成横杠；勿动 ISO 毫秒小数点，否则会解析失败甩出原串
-    const normalized = /^\d{4}\.\d{1,2}\.\d{1,2}\b/.test(s)
-      ? s.replace(/^(\d{4})\.(\d{1,2})\.(\d{1,2})/, "$1-$2-$3")
-      : s;
-    d = new Date(normalized);
-  }
+  const ms = parseTimeMs(raw);
+  if (ms == null) return String(raw);
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return String(raw);
   return d.toLocaleString("zh-CN", {
     year: "numeric",
@@ -461,13 +480,19 @@ function getUserJwt() {
   return localStorage.getItem(USER_JWT_KEY) || "";
 }
 
-function setUserJwt(token) {
+function setUserJwt(token, refreshToken) {
   localStorage.setItem(USER_JWT_KEY, token);
+  if (refreshToken) localStorage.setItem(USER_REFRESH_KEY, refreshToken);
   localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
+}
+
+function getUserRefresh() {
+  return localStorage.getItem(USER_REFRESH_KEY) || "";
 }
 
 function clearUserJwt() {
   localStorage.removeItem(USER_JWT_KEY);
+  localStorage.removeItem(USER_REFRESH_KEY);
   localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
 }
 
@@ -475,12 +500,18 @@ function getSuperJwt() {
   return localStorage.getItem(SUPER_JWT_KEY) || "";
 }
 
-function setSuperJwt(token) {
+function setSuperJwt(token, refreshToken) {
   localStorage.setItem(SUPER_JWT_KEY, token);
+  if (refreshToken) localStorage.setItem(SUPER_REFRESH_KEY, refreshToken);
+}
+
+function getSuperRefresh() {
+  return localStorage.getItem(SUPER_REFRESH_KEY) || "";
 }
 
 function clearSuperJwt() {
   localStorage.removeItem(SUPER_JWT_KEY);
+  localStorage.removeItem(SUPER_REFRESH_KEY);
 }
 
 function getAdminViewMode() {
@@ -522,8 +553,83 @@ function clearAdminToken() {
   clearAccessTicket();
 }
 
+function jwtExpMs(token) {
+  if (!token) return 0;
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return 0;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const json = JSON.parse(atob(normalized));
+    return Number(json.exp) * 1000 || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function applySessionPayload(data, { role } = {}) {
+  const access = (data && data.token) || "";
+  const refresh = (data && data.refresh_token) || "";
+  const nextRole = role || data?.role || "";
+  if (!access) return false;
+  if (nextRole === "SUPER_ADMIN") setSuperJwt(access, refresh);
+  else setUserJwt(access, refresh);
+  return true;
+}
+
+let sessionRefreshInFlight = null;
+
+async function refreshSessionPair(refreshToken) {
+  const res = await fetch(`${API}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!res.ok) return null;
+  return res.json().catch(() => null);
+}
+
+async function refreshSessions() {
+  const tasks = [];
+  const userRefresh = getUserRefresh();
+  if (userRefresh) {
+    tasks.push(
+      refreshSessionPair(userRefresh).then((data) => {
+        if (data) applySessionPayload(data, { role: "USER" });
+        else if (!getUserJwt() || Date.now() >= jwtExpMs(getUserJwt())) {
+          clearUserJwt();
+        }
+      })
+    );
+  }
+  const superRefresh = getSuperRefresh();
+  if (superRefresh) {
+    tasks.push(
+      refreshSessionPair(superRefresh).then((data) => {
+        if (data) applySessionPayload(data, { role: "SUPER_ADMIN" });
+        else if (!getSuperJwt() || Date.now() >= jwtExpMs(getSuperJwt())) {
+          clearSuperJwt();
+        }
+      })
+    );
+  }
+  if (tasks.length) await Promise.all(tasks);
+  return Boolean(getUserJwt() || getUserRefresh());
+}
+
+function scheduleSessionRefresh() {
+  if (!sessionRefreshInFlight) {
+    sessionRefreshInFlight = refreshSessions().finally(() => {
+      sessionRefreshInFlight = null;
+    });
+  }
+  return sessionRefreshInFlight;
+}
+
 function requireAdminPage() {
-  if (getUserJwt()) return true;
+  if (getUserJwt() || getUserRefresh()) {
+    scheduleSessionRefresh();
+    return true;
+  }
   // 首页飞书回调带 sso_ticket：允许脚本继续，由 finalizeSsoLoginFromQuery 兑换
   const params = new URLSearchParams(location.search);
   if (params.get("sso_ticket") && (location.pathname === "/" || location.pathname.endsWith("/index.html"))) {
@@ -560,7 +666,7 @@ async function finalizeSsoLoginFromQuery() {
         return { ok: false, setupName: false };
       }
       if (data.token) {
-        setUserJwt(data.token);
+        applySessionPayload(data, { role: "USER" });
         setAdminViewMode("user");
         clearAccessTicket();
       }
@@ -640,6 +746,7 @@ function withShareSessionQuery(url, sessionId) {
 }
 
 async function apiFetch(path, options = {}) {
+  if (sessionRefreshInFlight) await sessionRefreshInFlight;
   const headers = new Headers(options.headers || {});
   const token = getActiveBearer();
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -647,10 +754,24 @@ async function apiFetch(path, options = {}) {
     headers.set("Content-Type", "application/json");
   }
   const url = path.startsWith("http") ? path : `${API}${path.startsWith("/") ? "" : "/"}${path}`;
+  const skipRefresh =
+    url.includes("/auth/login") ||
+    url.includes("/auth/admin/login") ||
+    url.includes("/auth/refresh") ||
+    url.includes("/auth/super/login");
   const res = await fetch(url, { ...options, headers });
-  if (res.status === 401 && !url.includes("/auth/login") && !url.includes("/auth/admin/login")) {
+  if (res.status === 401 && !skipRefresh) {
     const peek = await res.clone().json().catch(() => ({}));
     if (peek.detail === "需要管理员登录") {
+      const refreshed = await scheduleSessionRefresh();
+      if (refreshed && getActiveBearer()) {
+        const retryHeaders = new Headers(options.headers || {});
+        retryHeaders.set("Authorization", `Bearer ${getActiveBearer()}`);
+        if (options.body && !retryHeaders.has("Content-Type")) {
+          retryHeaders.set("Content-Type", "application/json");
+        }
+        return fetch(url, { ...options, headers: retryHeaders });
+      }
       clearAdminToken();
       const next = `${location.pathname}${location.search}`;
       location.replace(`/login.html?next=${encodeURIComponent(next)}`);

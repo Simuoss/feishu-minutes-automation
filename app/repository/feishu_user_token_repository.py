@@ -40,6 +40,11 @@ class FeishuUserTokenRepository:
         result = await self._session.execute(stmt)
         return [int(uid) for uid in result.scalars().all() if uid is not None]
 
+    async def list_all(self) -> list[FeishuUserTokenEntity]:
+        stmt = select(FeishuUserTokenORM).order_by(FeishuUserTokenORM.user_id.asc())
+        result = await self._session.execute(stmt)
+        return [_to_entity(orm) for orm in result.scalars().all()]
+
     async def upsert(self, entity: FeishuUserTokenUpsertEntity) -> FeishuUserTokenEntity:
         stmt = select(FeishuUserTokenORM).where(
             FeishuUserTokenORM.user_id == entity.user_id

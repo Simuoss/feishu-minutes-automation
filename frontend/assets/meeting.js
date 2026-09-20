@@ -369,6 +369,11 @@ const STAGE_DEFS = {
     title: "收尾落盘",
     desc: "校正时间锚点、清理配图并写入本地",
   },
+  share: {
+    id: "share",
+    title: "压缩分享片",
+    desc: "把原片压成可分享的小视频，和成文可以同时进行",
+  },
 };
 
 const DEFAULT_STAGE_IDS = [
@@ -391,6 +396,7 @@ function stagesForProgress(data) {
   ids.push("parse", "scene");
   if (profile.has_figures) ids.push("figures", "redact");
   ids.push("write", "finalize");
+  if (profile.has_share) ids.push("share");
   return ids.map((id) => {
     const stage = STAGE_DEFS[id];
     if (id !== "transcribe") return stage;
@@ -419,7 +425,8 @@ function resolveSummaryStageId(data, stages) {
   if (data.job_type === "TRANSCRIBE" || /自建转写/.test(stage)) {
     return hasTranscribe ? "transcribe" : "parse";
   }
-  if (/排队|槽位|同账号|压缩分享/.test(stage)) return "queue";
+  if (/压缩分享/.test(stage)) return ids.has("share") ? "share" : "queue";
+  if (/排队|槽位|同账号/.test(stage)) return "queue";
   if (/无画面|跳过配图|直接成文/.test(stage)) return "write";
   if (/解析转写/.test(stage) || (percent > 0 && percent < 6)) return "parse";
   if (/场景|讲课还是会议/.test(stage)) return "scene";
@@ -1075,24 +1082,35 @@ function followTranscribeProgress(token) {
 }
 
 async function maybeFollowSummaryStream(token) {
-  try {
-    const prog = await apiFetch(
-      withOwnerQuery(`/meetings/${token}/summary/progress`)
-    );
-    if (!prog.ok) return;
-    const data = await prog.json();
-    applySummaryStatus(data);
-    if (data.job_type === "TRANSCRIBE") {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const prog = await apiFetch(
+        withOwnerQuery(`/meetings/${token}/summary/progress`)
+      );
+      if (prog.status === 404) {
+        if (attempt < 5) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          continue;
+        }
+        return;
+      }
+      if (!prog.ok) return;
+      const data = await prog.json();
+      applySummaryStatus(data);
+      if (data.job_type === "TRANSCRIBE") {
+        if (data.status === "QUEUED" || data.status === "GENERATING") {
+          followTranscribeProgress(token);
+        }
+        return;
+      }
       if (data.status === "QUEUED" || data.status === "GENERATING") {
-        followTranscribeProgress(token);
+        openSummaryStream(token);
       }
       return;
+    } catch {
+      if (attempt >= 5) return;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
-    if (data.status === "QUEUED" || data.status === "GENERATING") {
-      openSummaryStream(token);
-    }
-  } catch {
-    /* 404 / 网络：无需跟随 */
   }
 }
 
@@ -1279,6 +1297,7 @@ async function openDetail(minuteToken) {
 
     const hasTranscript = Boolean(data.has_transcript);
     const hasMediaFiles = Boolean((data.media_files || []).length);
+    const showSummaryWorkspace = hasTranscript || hasSummary || hasMediaFiles;
     if (hasTranscript) {
       detailState.fullTranscriptText = "";
       $("#transcript-scroll").innerHTML = thinkingHtml({ block: true });
@@ -1321,7 +1340,7 @@ async function openDetail(minuteToken) {
       .classList.toggle("hidden", !hasTranscript);
 
     const hasContent = hasMediaFiles || hasTranscript || hasSummary;
-    if (hasTranscript || hasSummary) {
+    if (showSummaryWorkspace) {
       $("#detail-tabs").classList.remove("hidden");
       const deepLinked =
         typeof applyAgentDeepLink === "function" &&

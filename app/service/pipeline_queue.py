@@ -492,3 +492,18 @@ async def latest_jobs(
         JOB_SHARE_VIDEO: video,
         JOB_TRANSCRIBE: transcribe,
     }
+
+
+async def inflight_meeting_keys() -> set[tuple[int, str]]:
+    """正在排队或执行的转写 / 纪要 / 分享片，列表用它点亮进度。"""
+    async with UnitOfWork() as uow:
+        assert uow.pipeline_jobs is not None
+        jobs = await uow.pipeline_jobs.list_by_statuses(
+            [STATUS_QUEUED, STATUS_RUNNING],
+            job_types=[JOB_SUMMARY, JOB_TRANSCRIBE, JOB_SHARE_VIDEO],
+        )
+    return {
+        (int(job.owner_user_id), job.minute_token)
+        for job in jobs
+        if job.owner_user_id is not None and job.minute_token
+    }

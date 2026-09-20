@@ -31,6 +31,7 @@ class ProgressProfileData(BaseModel):
     label: str
     has_transcribe: bool
     has_figures: bool
+    has_share: bool = False
 
 
 class SummaryProgressResponse(BaseModel):

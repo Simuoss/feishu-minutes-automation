@@ -14,6 +14,27 @@ from app.integrations.feishu.user_token_store import FeishuUserTokenStore
 logger = logging.getLogger(__name__)
 
 TOKEN_INVALID_CODES = {99991663, 99991664}
+# 刷新票进入最后两天就该换，避免等到过期才发现刷不了
+REFRESH_SLIDE_WINDOW_SECONDS = 2 * 86400
+
+
+def refresh_token_is_due(
+    refresh_expires_at: float | int | None,
+    *,
+    now: float | None = None,
+    unknown_is_due: bool = False,
+) -> bool:
+    """refresh 是否该换了。库里到期时间可能是秒或毫秒。"""
+    if refresh_expires_at is None:
+        return unknown_is_due
+    try:
+        expires = float(refresh_expires_at)
+    except (TypeError, ValueError):
+        return unknown_is_due
+    if expires > 10_000_000_000:
+        expires = expires / 1000.0
+    current = time.time() if now is None else now
+    return current > expires - REFRESH_SLIDE_WINDOW_SECONDS
 
 
 def parse_scope_string(scope: str | None) -> set[str]:
@@ -199,7 +220,15 @@ class FeishuUserAuthClient:
 
         expires_at = stored.get("expires_at")
         token = stored.get("access_token")
-        if token and expires_at and now < float(expires_at) - 60:
+        refresh_expires_at = stored.get("refresh_expires_at")
+        refresh_due = bool(
+            stored.get("refresh_token")
+            and refresh_token_is_due(refresh_expires_at, now=now)
+        )
+        access_fresh = bool(
+            token and expires_at and now < float(expires_at) - 60
+        )
+        if access_fresh and not refresh_due:
             return token
 
         if stored.get("refresh_token"):
@@ -215,6 +244,22 @@ class FeishuUserAuthClient:
 
     def is_authorized(self) -> bool:
         return self._store.is_authorized(self._user_id)
+
+    async def maybe_slide_refresh(self) -> None:
+        """刷新票快到期时主动换一轮，让新 refresh 也续上。"""
+        stored = await self._load_stored()
+        if not stored or not stored.get("refresh_token"):
+            return
+        if not refresh_token_is_due(stored.get("refresh_expires_at")):
+            return
+        try:
+            await self.refresh_access_token()
+        except Exception:
+            logger.warning(
+                "飞书 refresh 滑动续期失败 user_id=%s，下次拉妙记时再试",
+                self._user_id,
+                exc_info=True,
+            )
 
     async def auth_status_async(self) -> tuple[bool, list[str], list[str]]:
         """一次异步读库，供 /auth/feishu/status，避免多次 run_async。"""
@@ -309,20 +354,27 @@ class FeishuUserAuthClient:
         return payload
 
     def _persist_token_response(self, data: dict[str, Any]) -> None:
+        previous = self._store.load(self._user_id) or {}
         expires_in = int(data.get("expires_in", 7200))
         refresh_expires_in = data.get("refresh_token_expires_in") or data.get(
             "refresh_expires_in"
         )
         now = time.time()
         scope = data.get("scope") or decode_jwt_scope(data.get("access_token"))
+        new_refresh = data.get("refresh_token") or previous.get("refresh_token")
+        if refresh_expires_in:
+            refresh_expires_at = now + int(refresh_expires_in)
+        elif data.get("refresh_token"):
+            # 飞书换发了新 refresh 却没给时长，按 7 天估，总比丢掉强
+            refresh_expires_at = now + 604800
+        else:
+            refresh_expires_at = previous.get("refresh_expires_at")
         record = {
             "access_token": data.get("access_token"),
-            "refresh_token": data.get("refresh_token"),
-            "scope": scope,
+            "refresh_token": new_refresh,
+            "scope": scope or previous.get("scope"),
             "expires_at": now + expires_in,
-            "refresh_expires_at": now + int(refresh_expires_in)
-            if refresh_expires_in
-            else None,
+            "refresh_expires_at": refresh_expires_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._store.save(self._user_id, record)

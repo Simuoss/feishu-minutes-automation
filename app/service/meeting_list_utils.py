@@ -20,6 +20,10 @@ def parse_create_time(value: str | None) -> datetime | None:
     if not value:
         return None
     normalized = value.strip()
+    if normalized.isdigit():
+        epoch = int(normalized)
+        seconds = epoch / 1000.0 if epoch > 10_000_000_000 else float(epoch)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
     for fmt in ("%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(normalized, fmt).replace(tzinfo=timezone.utc)

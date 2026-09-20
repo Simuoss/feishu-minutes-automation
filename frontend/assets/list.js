@@ -556,10 +556,7 @@ function buildCloudSyncParams(pageToken) {
 }
 
 function parseMeetingTime(value) {
-  if (!value) return null;
-  const normalized = String(value).trim().replace(/\./g, "-").replace(" ", "T");
-  const ms = Date.parse(normalized);
-  return Number.isNaN(ms) ? null : ms;
+  return typeof parseTimeMs === "function" ? parseTimeMs(value) : null;
 }
 
 function filterAndSortAllItems() {

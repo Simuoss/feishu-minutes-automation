@@ -21,6 +21,7 @@ class ProgressProfile:
     label: str
     has_transcribe: bool
     has_figures: bool
+    has_share: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -28,23 +29,24 @@ class ProgressProfile:
             "label": self.label,
             "has_transcribe": self.has_transcribe,
             "has_figures": self.has_figures,
+            "has_share": self.has_share,
         }
 
 
 PROFILE_FEISHU_FULL = ProgressProfile(
-    "feishu_full", "飞书全转写", False, True
+    "feishu_full", "飞书全转写", False, True, True
 )
 PROFILE_FEISHU_PARTIAL = ProgressProfile(
-    "feishu_partial", "飞书不全转写", True, True
+    "feishu_partial", "飞书不全转写", True, True, True
 )
 PROFILE_IMPORT_VIDEO = ProgressProfile(
-    "import_video", "上传视频", True, True
+    "import_video", "上传视频", True, True, True
 )
 PROFILE_IMPORT_AUDIO = ProgressProfile(
-    "import_audio", "上传音频", True, False
+    "import_audio", "上传音频", True, False, False
 )
 PROFILE_IMPORT_TEXT = ProgressProfile(
-    "import_text", "上传文字", False, False
+    "import_text", "上传文字", False, False, False
 )
 
 

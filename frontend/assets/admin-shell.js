@@ -283,7 +283,7 @@ function bindSuperModal(root) {
       }
       return;
     }
-    setSuperJwt(data.token);
+    applySessionPayload(data, { role: "SUPER_ADMIN" });
     setAdminViewMode("super");
     clearAccessTicket();
     location.reload();
